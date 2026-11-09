@@ -1,0 +1,17 @@
+# For dataset downloading...
+gdown
+
+# For preprocessing...
+jsonlines
+# tqdm
+
+# For encoding...
+transformers[torch]==4.44.2     # transformers[torch]
+datasets==3.0.1
+scipy
+scikit-learn
+# tf-keras                # only needed to use transformers < 4.45.0
+peft
+
+# For monitoring...
+gpustat
