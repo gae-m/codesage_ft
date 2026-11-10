@@ -51,7 +51,7 @@ class AttentionMILCodeSage(nn.Module):
         loss = None
         if labels is not None:
             # You can replace this with Focal Loss
-            loss_fct = nn.CrossEntropyLoss()
+            loss_fct = nn.BCEWithLogitsLoss() # nn.CrossEntropyLoss()
             loss = loss_fct(logits, labels)
             
         return {"loss": loss, "logits": logits, "attention_weights": attn_weights}
