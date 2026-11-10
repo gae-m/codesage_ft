@@ -13,7 +13,7 @@ WORKDIR /root/codesage_ft
 COPY data/primevul.7z data
 
 RUN --mount=type=bind,source=requirements.txt,target=/tmp/requirements.txt \
-    pip install -r --no-cache-dir /tmp/requirements.txt
+    pip install --no-cache-dir -r /tmp/requirements.txt
 
 # Keep default RunPod entrypoint (starts SSH and JupyterLab)
 COPY startup.sh .

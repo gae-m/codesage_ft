@@ -1,7 +1,5 @@
 import torch
 import torch.nn as nn
-from transformers import AutoModel
-from peft import LoraConfig, get_peft_model
 
 class AttentionMILCodeSage(nn.Module):
     def __init__(self, encoder: nn.Module, hidden_size=2048, attention_dim=256, num_classes=2):
@@ -15,6 +13,9 @@ class AttentionMILCodeSage(nn.Module):
             nn.Linear(attention_dim, 1)
         )
         self.classifier = nn.Linear(hidden_size, num_classes)
+
+        # You can replace this with Focal Loss
+        self.loss_fct = nn.BCEWithLogitsLoss() # nn.CrossEntropyLoss()
 
     def forward(self, input_ids, attention_mask, chunk_mask=None, labels=None):
         # Shapes: input_ids -> (batch_size, max_chunks, seq_len)
@@ -50,8 +51,6 @@ class AttentionMILCodeSage(nn.Module):
         # Compute loss natively so Hugging Face Trainer can use it seamlessly
         loss = None
         if labels is not None:
-            # You can replace this with Focal Loss
-            loss_fct = nn.BCEWithLogitsLoss() # nn.CrossEntropyLoss()
-            loss = loss_fct(logits, labels)
+            loss = self.loss_fct(logits, labels.float())
             
         return {"loss": loss, "logits": logits, "attention_weights": attn_weights}
