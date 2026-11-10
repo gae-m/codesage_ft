@@ -56,3 +56,6 @@ The pipeline relies on a custom hybrid architecture:
 | `gradient_checkpointing`| True | Trades a ~20% increase in compute time for a ~50% reduction in VRAM by recalculating backward-pass activations dynamically. |
 | `bf16` | True | Bfloat16 provides a massive dynamic range, completely eliminating `NaN` loss scaling errors common when fine-tuning code models in FP16. |
 | `save_strategy` | "no" | Disables native Hugging Face checkpointing to avoid dumping the frozen 1.3B base model to disk, relying entirely on the custom saving subclass. |
+
+## Resuls
+TBD

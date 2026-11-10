@@ -1,9 +1,12 @@
 #!/bin/bash
 set -e
 
+# 1. Unzip the dataset
+7z x data/primevul.7z -odata/ -y
+
 # 2. Set repository details (Override via ENV or edit defaults below)
 REPO_OWNER_REPO="gae-m/codesage_ft"
-TARGET_DIR="/root/codesage_ft"
+TARGET_DIR="./codesage_ft"
 
 # Wait for DNS and network to become available (up to 30 seconds)
 echo "Testing internet connectivity..."
@@ -34,11 +37,8 @@ git clone "https://github.com/${REPO_OWNER_REPO}.git" "$TARGET_DIR"
 # fi
 
 # 4. Install Python dependencies
-pip install --no-cache-dir -r requirements.txt
+pip install --no-cache-dir -r $TARGET_DIR/requirements.txt
 
-# 5. Unzip the dataset
-7z x data/primevul.7z -odata/ -y
-
-# 6. Hand off execution to RunPod's standard entrypoint
+# 5. Hand off execution to RunPod's standard entrypoint
 echo "Initialization complete. Launching RunPod services..."
 exec /start.sh "$@"

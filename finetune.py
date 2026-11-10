@@ -17,9 +17,9 @@ MAX_CHUNKS_PER_BAG = 16  # Limit the number of chunks per function to avoid memo
 DEBUG = True  # Set to True for quick debugging with a smaller dataset
 # Define the mapping of your splits to the local file paths
 DATAPATHS = {
-    "train": r"data\primevul\primevul_train_paired.jsonl",
-    "validation": r"data\primevul\primevul_valid_paired.jsonl",
-    "test": r"data\primevul\primevul_test_paired.jsonl"
+    "train": r"data/primevul/primevul_train_paired.jsonl",
+    "validation": r"data/primevul/primevul_valid_paired.jsonl",
+    "test": r"data/primevul/primevul_test_paired.jsonl"
 }
 
 def load_data(data_files: dict[str, str], tokenizer: AutoTokenizer) -> DatasetDict:

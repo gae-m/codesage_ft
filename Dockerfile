@@ -10,7 +10,7 @@ RUN apt-get update --yes && \
 # Set working directory
 WORKDIR /root/codesage_ft
 
-COPY data/primevul.7z data
+COPY data/primevul.7z data/primevul.7z
 
 RUN --mount=type=bind,source=requirements.txt,target=/tmp/requirements.txt \
     pip install --no-cache-dir -r /tmp/requirements.txt
