@@ -6,7 +6,7 @@ from transformers import AutoTokenizer, AutoModel, TrainingArguments, Trainer
 from peft import LoraConfig, get_peft_model, TaskType, PeftModel
 from datasets import load_dataset, DatasetDict
 from sklearn.metrics import roc_auc_score
-from time import time
+from time import time, perf_counter
 
 from collator import AttentionMILCollator
 from classifier_wrapper import AttentionMILCodeSage
@@ -14,6 +14,7 @@ from classifier_wrapper import AttentionMILCodeSage
 
 ENCODER = "codesage/codesage-large-v2"
 MAX_CHUNKS_PER_BAG = 16  # Limit the number of chunks per function to avoid memory issues
+MAX_SEQ_LEN = 512  # Each chunk is a sequence of 512 tokens. If you have enough GPU memory, you can increase this to 1024 or 2048, but be aware of the memory trade-offs.
 DEBUG = True  # Set to True for quick debugging with a smaller dataset
 # Define the mapping of your splits to the local file paths
 DATAPATHS = {
@@ -32,7 +33,7 @@ def load_data(data_files: dict[str, str], tokenizer: AutoTokenizer) -> DatasetDi
         tokenized = tokenizer(
             example["func"],  # Assuming the code is stored under the key "func"
             truncation=True,
-            max_length=512,
+            max_length=MAX_SEQ_LEN,
             stride=50,
             return_overflowing_tokens=True,
             return_offsets_mapping=False,
@@ -88,9 +89,14 @@ def save_model(model: AttentionMILCodeSage, out_dir: str):
 
 
 def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "codesage/codesage-large-v2", dbg = False):
+    print("Debug mode: ", dbg)
+    
     tokenizer = AutoTokenizer.from_pretrained(encoder_name, trust_remote_code=True)
 
+    print("Loading and tokenizing dataset...")
     tokenized_dataset = load_data(data_files, tokenizer)
+    print("Tokenization complete. Dataset overview:")
+    print(tokenized_dataset)
 
     if dbg:
         print("Debug mode: Reducing dataset size for quick testing...")
@@ -99,6 +105,7 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         test_set = tokenized_dataset["test"].select(range(min(10, len(tokenized_dataset["test"]))))
         tokenized_dataset = DatasetDict({"train": train_set, "validation": eval_set, "test": test_set})
 
+    print("Loading the model...")
     # Load base CodeSage without the classification head
     base_encoder = AutoModel.from_pretrained(
         encoder_name,
@@ -119,7 +126,12 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
     print(f"{base_encoder.config.hidden_size=}")
     mil_model = AttentionMILCodeSage(encoder=peft_encoder, hidden_size=base_encoder.config.hidden_size)
 
+    print("Model loaded. Preparing for training...")
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    bf16_support = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    print("Using device:", device)
+    print("bf16 support:", bf16_support)
 
     mil_model = mil_model.to(device) # Move to GPU
 
@@ -134,7 +146,7 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         gradient_checkpointing=True, # Save memory by not storing intermediate activations
         warmup_ratio=0.1,
         num_train_epochs=5,
-        bf16=(torch.cuda.is_available() and torch.cuda.is_bf16_supported()),
+        bf16=bf16_support,
         metric_for_best_model="val/auroc",
         logging_steps=50,
         logging_first_step=True,
@@ -157,7 +169,11 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         compute_metrics=compute_auroc_metrics
     )
 
+    print("Starting training...")
+    start_time = perf_counter()
     trainer.train()
+    end_time = perf_counter()
+    print(f"Training completed in {end_time - start_time:.2f} seconds.")
 
     # 2. Evaluate on the Test Set
     print("Running final evaluation on the Test Set...")
@@ -168,6 +184,7 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         print(f"{metric_name}: {value:.4f}")
 
     # Save only the adapters and the classifier head
+    print(f"Saving the fine-tuned model to {out_dir}...")
     save_model(mil_model, out_dir)
 
 
