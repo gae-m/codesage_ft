@@ -153,7 +153,7 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
     lora_config = LoraConfig(
         r=16,
         lora_alpha=32,
-        target_modules=["query", "value"], 
+        target_modules="all-linear",  # Apply LoRA to all linear layers in the encoder
         # Do NOT include "classifier" here, because our classifier is in the wrapper, not the PEFT model
     )
     peft_encoder = get_peft_model(base_encoder, lora_config)
