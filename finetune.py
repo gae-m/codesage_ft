@@ -3,7 +3,7 @@ from typing import Any, cast
 
 import torch
 from transformers import AutoTokenizer, AutoModel, TrainingArguments, Trainer
-from peft import LoraConfig, get_peft_model, TaskType, PeftModel
+from peft import LoraConfig, get_peft_model, TaskType, PeftModel, prepare_model_for_kbit_training
 from datasets import load_dataset, DatasetDict
 from sklearn.metrics import roc_auc_score
 from time import time, perf_counter
@@ -13,9 +13,9 @@ from classifier_wrapper import AttentionMILCodeSage
 
 
 ENCODER = "codesage/codesage-large-v2"
-MAX_CHUNKS_PER_BAG = 16         # Limit the number of chunks per function to avoid memory issues
+MAX_CHUNKS_PER_BAG = 8         # Limit the number of chunks per function to avoid memory issues
 MAX_SEQ_LEN = 512               # Each chunk is a sequence of 512 tokens. If you have enough GPU memory, you can increase this to 1024 or 2048, but be aware of the memory trade-offs.
-DEBUG = True                    # Set to True for quick debugging with a smaller dataset
+DEBUG = False                    # Set to True for quick debugging with a smaller dataset
 
 # Define the mapping of your splits to the local file paths
 DATAPATHS = {
@@ -96,8 +96,20 @@ def load_data(data_files: dict[str, str], tokenizer: AutoTokenizer) -> DatasetDi
 def compute_auroc_metrics(eval_pred):
     logits, labels = eval_pred
     
+    # Trainer collects every model output other than loss as predictions.
+    # The wrapper also returns attention_weights, so predictions can be
+    # (logits, attention_weights) rather than just the logits tensor.
+    if isinstance(logits, (tuple, list)):
+        logits = logits[0]
+
     # 1. Apply sigmoid to convert raw logits into probabilities
-    probabilities = torch.sigmoid(torch.as_tensor(logits)).squeeze(-1).numpy()
+    probabilities = (
+        torch.sigmoid(torch.as_tensor(logits))
+        .squeeze(-1)
+        .reshape(-1)
+        .numpy()
+    )
+    labels = torch.as_tensor(labels).reshape(-1).numpy()
     
     # 2. Calculate AUROC
     try:
@@ -156,10 +168,10 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         target_modules="all-linear",  # Apply LoRA to all linear layers in the encoder
         # Do NOT include "classifier" here, because our classifier is in the wrapper, not the PEFT model
     )
+
     peft_encoder = get_peft_model(base_encoder, lora_config)
 
     # Initialize the Attention-MIL model
-    print(f"{base_encoder.config.hidden_size=}")
     mil_model = AttentionMILCodeSage(encoder=peft_encoder, hidden_size=base_encoder.config.hidden_size)
 
     print("Model loaded. Preparing for training...")
@@ -177,9 +189,9 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         max_steps=3 if dbg else -1,
         per_device_train_batch_size=1, # Keep batch size small; you are processing (batch * chunks) sequences at once
         learning_rate=2e-4,
-        evaluation_strategy="epoch",
+        eval_strategy="epoch",
         gradient_accumulation_steps=16, # Simulate a larger batch size
-        gradient_checkpointing=True, # Save memory by not storing intermediate activations
+        gradient_checkpointing=False, # Save memory by not storing intermediate activations. CodeSage does not support gradient checkpointing natively.
         warmup_ratio=0.1,
         num_train_epochs=5,
         bf16=bf16_support,
@@ -232,7 +244,6 @@ def load_model(model_dir: str, encoder_name: str = "codesage/codesage-large-v2")
     # 2. Load the trained LoRA adapters onto the base model
     peft_encoder = PeftModel.from_pretrained(base_model, os.path.join(model_dir, "lora-adapters"))
 
-    print(f"{base_model.config.hidden_size=}")
     # 3. Initialize your custom architecture wrapper
     loaded_mil_model = AttentionMILCodeSage(
         encoder=peft_encoder, 
