@@ -3,7 +3,7 @@ from typing import Any, cast
 
 import torch
 from transformers import AutoTokenizer, AutoModel, TrainingArguments, Trainer
-from peft import LoraConfig, get_peft_model, TaskType, PeftModel, prepare_model_for_kbit_training
+from peft import LoraConfig, get_peft_model, PeftModel
 from datasets import load_dataset, DatasetDict
 from sklearn.metrics import roc_auc_score
 from time import time, perf_counter
@@ -89,7 +89,7 @@ def load_data(data_files: dict[str, str], tokenizer: AutoTokenizer) -> DatasetDi
         }
 
     # Apply without batched=True to keep chunks grouped by their parent function
-    tokenized_dataset = raw_dataset.map(tokenize_into_bags, remove_columns=["func"])
+    tokenized_dataset = raw_dataset.map(tokenize_into_bags, remove_columns=["func", "commit_id", "target", "hash"])
     return tokenized_dataset
 
 
@@ -118,7 +118,7 @@ def compute_auroc_metrics(eval_pred):
         # Handles edge cases where a batch might only contain one class during testing
         auroc = 0.5 
         
-    return {"val/auroc": auroc}
+    return {"auroc": auroc}
 
 
 def save_model(model: AttentionMILCodeSage, out_dir: str):
@@ -163,9 +163,13 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
 
     # Apply LoRA to the base encoder
     lora_config = LoraConfig(
+        
         r=16,
         lora_alpha=32,
+        lora_dropout=0.05,
         target_modules="all-linear",  # Apply LoRA to all linear layers in the encoder
+        fan_in_fan_out=True,
+        bias="none"
         # Do NOT include "classifier" here, because our classifier is in the wrapper, not the PEFT model
     )
 
@@ -195,7 +199,7 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         warmup_ratio=0.1,
         num_train_epochs=5,
         bf16=bf16_support,
-        metric_for_best_model="val/auroc",
+        metric_for_best_model="auroc",
         logging_steps=50,
         logging_first_step=True,
         report_to=["tensorboard"],
