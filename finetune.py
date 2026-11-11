@@ -78,7 +78,7 @@ def load_data(data_files: dict[str, str], tokenizer: AutoTokenizer) -> DatasetDi
             chunked_attention_mask.append(chunk_mask)
 
         if len(chunked_input_ids) > MAX_CHUNKS_PER_BAG:
-            print(f"Warning: Function {example['func']} has {len(chunked_input_ids)} chunks, exceeding the limit of {MAX_CHUNKS_PER_BAG}. Truncating to the first {MAX_CHUNKS_PER_BAG} chunks.")
+            print(f"Warning: Function {example['idx']} has {len(chunked_input_ids)} chunks, exceeding the limit of {MAX_CHUNKS_PER_BAG}. Truncating to the first {MAX_CHUNKS_PER_BAG} chunks.")
             chunked_input_ids = chunked_input_ids[:MAX_CHUNKS_PER_BAG]
             chunked_attention_mask = chunked_attention_mask[:MAX_CHUNKS_PER_BAG]
             
@@ -263,5 +263,11 @@ def main():
     experiment_name = f"{enc_name_map[ENCODER]}_mil_ft_{int(time())}"
     out_dir = f"out/{experiment_name}"
 
+    os.makedirs(out_dir, exist_ok=True)
+
     # Fine-tune the model
     fine_tuning(DATAPATHS, out_dir, encoder_name=ENCODER, dbg=DEBUG)
+
+
+if __name__ == "__main__":
+    main()
