@@ -13,14 +13,15 @@ from classifier_wrapper import AttentionMILCodeSage
 
 
 ENCODER = "codesage/codesage-large-v2"
-MAX_CHUNKS_PER_BAG = 16  # Limit the number of chunks per function to avoid memory issues
-MAX_SEQ_LEN = 512  # Each chunk is a sequence of 512 tokens. If you have enough GPU memory, you can increase this to 1024 or 2048, but be aware of the memory trade-offs.
-DEBUG = True  # Set to True for quick debugging with a smaller dataset
+MAX_CHUNKS_PER_BAG = 16         # Limit the number of chunks per function to avoid memory issues
+MAX_SEQ_LEN = 512               # Each chunk is a sequence of 512 tokens. If you have enough GPU memory, you can increase this to 1024 or 2048, but be aware of the memory trade-offs.
+DEBUG = True                    # Set to True for quick debugging with a smaller dataset
+
 # Define the mapping of your splits to the local file paths
 DATAPATHS = {
-    "train": r"data/primevul/primevul_train_paired.jsonl",
-    "validation": r"data/primevul/primevul_valid_paired.jsonl",
-    "test": r"data/primevul/primevul_test_paired.jsonl"
+    "train": r"data/processed/primevul/primevul_train_paired.jsonl",
+    "validation": r"data/processed/primevul/primevul_valid_paired.jsonl",
+    "test": r"data/processed/primevul/primevul_test_paired.jsonl"
 }
 
 def load_data(data_files: dict[str, str], tokenizer: AutoTokenizer) -> DatasetDict:
@@ -29,27 +30,62 @@ def load_data(data_files: dict[str, str], tokenizer: AutoTokenizer) -> DatasetDi
     print(raw_dataset)
 
     def tokenize_into_bags(example: dict[str, Any]) -> dict[str, Any]:
-        # Tokenize a single function into multiple overlapping chunks
+        # 1. Tokenize the entire function without truncation and without special tokens
         tokenized = tokenizer(
-            example["func"],  # Assuming the code is stored under the key "func"
-            truncation=True,
-            max_length=MAX_SEQ_LEN,
-            stride=50,
-            return_overflowing_tokens=True,
-            return_offsets_mapping=False,
-            padding="max_length"
+            example["func"], 
+            truncation=False, 
+            padding=False,
+            add_special_tokens=False 
         )
         
-        # tokenized["input_ids"] is now a list of lists. Shape: (num_chunks, 512)
-        if len(tokenized["input_ids"]) > MAX_CHUNKS_PER_BAG:
-            print(f"Function {example['idx']} has {len(tokenized['input_ids'])} chunks, truncating to {MAX_CHUNKS_PER_BAG}.")
-            tokenized["input_ids"] = tokenized["input_ids"][:MAX_CHUNKS_PER_BAG]
-            tokenized["attention_mask"] = tokenized["attention_mask"][:MAX_CHUNKS_PER_BAG]
+        raw_input_ids = tokenized["input_ids"]
+        
+        # 2. Identify special tokens for CodeSage (defaults to <s>/</s> or [CLS]/[SEP])
+        cls_token = tokenizer.cls_token_id or tokenizer.bos_token_id
+        sep_token = tokenizer.sep_token_id or tokenizer.eos_token_id
+        pad_token = tokenizer.pad_token_id
+        
+        max_length = 512
+        stride = 50
+        usable_length = max_length - 2  # Reserve 2 spaces for the CLS and SEP tokens
+        step = usable_length - stride
+        
+        chunked_input_ids = []
+        chunked_attention_mask = []
+        
+        # 3. Slide the window to create properly formatted 2D chunks
+        for i in range(0, len(raw_input_ids), step):
+            chunk_code_ids = raw_input_ids[i : i + usable_length]
+            
+            # Manually inject [CLS] at the start and [SEP] at the end
+            chunk_ids = [cls_token] + chunk_code_ids + [sep_token]
+            chunk_mask = [1] * len(chunk_ids)
+            
+            # Pad the individual chunk to exactly 512 tokens
+            pad_len = max_length - len(chunk_ids)
+            if pad_len > 0:
+                chunk_ids.extend([pad_token] * pad_len)
+                chunk_mask.extend([0] * pad_len)
+                
+            chunked_input_ids.append(chunk_ids)
+            chunked_attention_mask.append(chunk_mask)
+                
+        # Handle the edge case of an empty string
+        if not chunked_input_ids:
+            chunk_ids = [cls_token, sep_token] + [pad_token] * (max_length - 2)
+            chunk_mask = [1, 1] + [0] * (max_length - 2)
+            chunked_input_ids.append(chunk_ids)
+            chunked_attention_mask.append(chunk_mask)
 
+        if len(chunked_input_ids) > MAX_CHUNKS_PER_BAG:
+            print(f"Warning: Function {example['func']} has {len(chunked_input_ids)} chunks, exceeding the limit of {MAX_CHUNKS_PER_BAG}. Truncating to the first {MAX_CHUNKS_PER_BAG} chunks.")
+            chunked_input_ids = chunked_input_ids[:MAX_CHUNKS_PER_BAG]
+            chunked_attention_mask = chunked_attention_mask[:MAX_CHUNKS_PER_BAG]
+            
         return {
-            "input_ids": tokenized["input_ids"],
-            "attention_mask": tokenized["attention_mask"],
-            "label": example["target"]  # Assuming the label is stored under the key "target"
+            "input_ids": chunked_input_ids,
+            "attention_mask": chunked_attention_mask,
+            "label": example["target"]
         }
 
     # Apply without batched=True to keep chunks grouped by their parent function

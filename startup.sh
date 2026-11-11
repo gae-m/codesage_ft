@@ -2,7 +2,7 @@
 set -e
 
 # 1. Unzip the dataset
-7z x data/primevul.7z -odata/ -y
+7z x data/primevul.7z -odata/origin -y
 
 # 2. Set repository details (Override via ENV or edit defaults below)
 REPO_OWNER_REPO="gae-m/codesage_ft"
