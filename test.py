@@ -100,6 +100,17 @@ class AttentionMILSmokeTest(unittest.TestCase):
         )
         self.assertAlmostEqual(metrics["val/auroc"], 1.0)
 
+        metrics = compute_auroc_metrics(
+            (
+                (
+                    torch.tensor([[-2.0], [2.0]]),
+                    torch.zeros(2, 2),
+                ),
+                torch.tensor([0, 1]),
+            )
+        )
+        self.assertAlmostEqual(metrics["val/auroc"], 1.0)
+
     def test_gradient_checkpointing_is_delegated(self):
         encoder = FakeEncoder()
         model = AttentionMILCodeSage(encoder, hidden_size=4)

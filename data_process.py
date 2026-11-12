@@ -14,7 +14,7 @@ def select_columns(src_file: str, dst_file: str, columns: list[str]) -> None:
     with jsonlines.open(src_file) as reader:
         with jsonlines.open(dst_file, mode='w') as writer:
             for obj in reader:
-                selected_obj = {col: obj[col] for col in columns if col in obj}
+                selected_obj = {col: obj[col] for col in columns}
                 writer.write(selected_obj)
 
 
@@ -29,11 +29,14 @@ def main():
     ]
     src_dir = "data/origin/primevul"
     dst_dir = "data/processed/primevul"
+    selected_columns = ["idx", "func", "commit_id", "hash", "target"]
+
+    os.makedirs(dst_dir, exist_ok=True)
 
     for file_name in file_names:
         src_file = os.path.join(src_dir, file_name)
         dst_file = os.path.join(dst_dir, file_name)
-        select_columns(src_file, dst_file, columns=["func", "label"])
+        select_columns(src_file, dst_file, columns=selected_columns)
         print(f"Processed {file_name} and saved to {dst_file}")
 
 
