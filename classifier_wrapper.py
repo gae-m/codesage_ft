@@ -48,7 +48,7 @@ class GatedAttention(nn.Module):
 
 
 class AttentionMILCodeSage(nn.Module):
-    def __init__(self, encoder: nn.Module, hidden_size=2048, attention_dim=256, mlp_dropout=0.1):
+    def __init__(self, encoder: nn.Module, hidden_size, attention_dim=256, mlp_dropout=0.1):
         super().__init__()
         self.encoder = encoder
         
