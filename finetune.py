@@ -1,4 +1,5 @@
 import os
+import sys
 from typing import Any, cast
 
 import torch
@@ -89,7 +90,7 @@ def load_data(data_files: dict[str, str], tokenizer: AutoTokenizer) -> DatasetDi
         }
 
     # Apply without batched=True to keep chunks grouped by their parent function
-    tokenized_dataset = raw_dataset.map(tokenize_into_bags, remove_columns=["func", "commit_id", "target", "hash"])
+    tokenized_dataset = raw_dataset.map(tokenize_into_bags, remove_columns=["func", "commit_id", "target", "hash", "idx"])
     return tokenized_dataset
 
 
@@ -163,7 +164,6 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
 
     # Apply LoRA to the base encoder
     lora_config = LoraConfig(
-        
         r=16,
         lora_alpha=32,
         lora_dropout=0.05,
@@ -203,7 +203,7 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         logging_steps=50,
         logging_first_step=True,
         report_to=["tensorboard"],
-        logging_dir=out_dir + "/logs",
+        logging_dir=out_dir,
         # Crucial: Since our model is custom and doesn't subclass PreTrainedModel cleanly for saving, 
         # disable standard HF saving and save state_dict manually, or handle carefully.
         save_strategy="no" 
@@ -223,9 +223,15 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
 
     print("Starting training...")
     start_time = perf_counter()
-    trainer.train()
-    end_time = perf_counter()
-    print(f"Training completed in {end_time - start_time:.2f} seconds.")
+    try:
+        trainer.train(
+            ignore_keys_for_eval=["attention_weights"]  # Ignore the attention weights during evaluation to avoid unnecessary computation
+        )
+        end_time = perf_counter()
+        print(f"Training completed in {end_time - start_time:.2f} seconds.")
+    except KeyboardInterrupt:
+        end_time = perf_counter()
+        print(f"Training interrupted by user after {end_time - start_time:.2f} seconds.")
 
     # 2. Evaluate on the Test Set
     print("Running final evaluation on the Test Set...")
@@ -266,6 +272,25 @@ def load_model(model_dir: str, encoder_name: str = "codesage/codesage-large-v2")
     return loaded_mil_model
 
 
+class Tee:
+    def __init__(self, filename, mode="a"):
+        self.file = open(filename, mode, encoding="utf-8")
+        self.stdout = sys.stdout
+
+    def write(self, data):
+        self.stdout.write(data)
+        self.file.write(data)
+
+    def flush(self):
+        # Ensures real-time output without buffering delays
+        self.stdout.flush()
+        self.file.flush()
+
+    def close(self):
+        sys.stdout = self.stdout
+        self.file.close()
+
+
 enc_name_map = {
     "codesage/codesage-large-v2": "cs2l",
     "codesage/codesage-base-v2": "cs2b",
@@ -276,12 +301,20 @@ enc_name_map = {
 def main():
     # Define the output directory for saving the model
     experiment_name = f"{enc_name_map[ENCODER]}_mil_ft_{int(time())}"
-    out_dir = f"out/{experiment_name}"
+    if DEBUG:
+        experiment_name = 'dbg_' + experiment_name
 
+    out_dir = f"out/{experiment_name}"
     os.makedirs(out_dir, exist_ok=True)
+
+    tee = Tee(os.path.join(out_dir, "train.log"))
+    sys.stdout = tee
 
     # Fine-tune the model
     fine_tuning(DATAPATHS, out_dir, encoder_name=ENCODER, dbg=DEBUG)
+
+    # Restore original stdout when done
+    tee.close()
 
 
 if __name__ == "__main__":
