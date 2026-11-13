@@ -1,5 +1,4 @@
 import re
-from typing import Callable, Dict, Set
 
 # Master C/C++ lexer regex: matches literals BEFORE comments so strings containing
 # "//" or "/* */" are never accidentally corrupted.
@@ -13,7 +12,7 @@ CPP_LEXER_RE = re.compile(
 )
 
 # Operator pairs that would change meaning or become comments if adjacent whitespace is removed
-DANGEROUS_PAIRS: Set[tuple[str, str]] = {
+DANGEROUS_PAIRS: set[tuple[str, str]] = {
     ("/", "*"), ("*", "/"), ("/", "/"),
     ("+", "+"), ("-", "-"), ("<", "<"), (">", ">"),
     ("&", "&"), ("|", "|"), ("=", "="), ("!", "="),
@@ -24,7 +23,7 @@ DANGEROUS_PAIRS: Set[tuple[str, str]] = {
 }
 
 # Preserve C/C++ keywords and security-critical standard/POSIX APIs during identifier compression
-PRESERVED_TOKENS: Set[str] = {
+PRESERVED_TOKENS: set[str] = {
     # C/C++ keywords & primitive types
     "auto", "break", "case", "char", "const", "continue", "default", "do", "double",
     "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long",
@@ -99,7 +98,7 @@ def compress_long_identifiers(code: str, min_len: int = 8) -> str:
     Technique 5 (Optional / Lossy): Renames non-API identifiers of length >= `min_len`
     to compact `v0, v1, ...` symbols while preserving literals and standard library APIs.
     """
-    mapping: Dict[str, str] = {}
+    mapping: dict[str, str] = {}
     counter = 0
 
     def _rename_outside_literals(segment: str) -> str:
@@ -198,11 +197,13 @@ def minify_cpp_function(
 
 
 import numpy as np
+from datasets import load_dataset, DatasetDict
+from transformers import AutoTokenizer
 
-def benchmark_minification(dataset_split, tokenizer, n_samples=500):
+def benchmark_minification(code_funcs: list, tokenizer, n_samples=-1) -> None:
     orig_lens, std_lens, agg_lens = [], [], []
-    for i in range(min(n_samples, len(dataset_split))):
-        raw = dataset_split[i]["func"]
+    code_funcs = code_funcs[:n_samples]
+    for raw in code_funcs:
         std = minify_cpp_function(raw, aggressive_whitespace=False)
         agg = minify_cpp_function(raw, aggressive_whitespace=True)
 
@@ -210,6 +211,27 @@ def benchmark_minification(dataset_split, tokenizer, n_samples=500):
         std_lens.append(len(tokenizer.encode(std, add_special_tokens=False)))
         agg_lens.append(len(tokenizer.encode(agg, add_special_tokens=False)))
 
-    print(f"Original mean tokens:   {np.mean(orig_lens):.1f} (95th pct: {np.percentile(orig_lens, 95):.0f})")
-    print(f"Standard minification:  {np.mean(std_lens):.1f} (-{(1 - np.mean(std_lens)/np.mean(orig_lens))*100:.1f}%)")
-    print(f"Aggressive minification:{np.mean(agg_lens):.1f} (-{(1 - np.mean(agg_lens)/np.mean(orig_lens))*100:.1f}%)")
+    print(f"Original mean tokens:   {np.mean(orig_lens):.1f}, 95th pct: {np.percentile(orig_lens, 95):.0f}")
+    print(f"Standard minification:  {np.mean(std_lens):.1f} (-{(1 - np.mean(std_lens)/np.mean(orig_lens))*100:.1f}%), 95th pct: {np.percentile(std_lens, 95):.0f}")
+    print(f"Aggressive minification:{np.mean(agg_lens):.1f} (-{(1 - np.mean(agg_lens)/np.mean(orig_lens))*100:.1f}%), 95th pct: {np.percentile(agg_lens, 95):.0f}")
+
+
+def main():
+    data_files = {
+        "train": r"data/processed/primevul/primevul_train_paired.jsonl",
+        "validation": r"data/processed/primevul/primevul_valid_paired.jsonl",
+        "test": r"data/processed/primevul/primevul_test_paired.jsonl"
+    }
+    encoder_name = r"codesage/codesage-large-v2"
+
+    dataset: DatasetDict = load_dataset("json", data_files=data_files) #type: ignore
+
+    tokenizer = AutoTokenizer.from_pretrained(encoder_name, trust_remote_code=True)
+
+    code_funcs = dataset["train"]["func"]
+    benchmark_minification(code_funcs, tokenizer)
+
+
+if __name__ == "__main__":
+    main()
+

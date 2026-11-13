@@ -11,11 +11,14 @@ from time import time, perf_counter
 
 from collator import AttentionMILCollator
 from classifier_wrapper import AttentionMILCodeSage
+from cs_checkpointing import enable_codesage_block_checkpointing
+from code_minification import minify_cpp_function
 
 
 ENCODER = "codesage/codesage-large-v2"
 MAX_CHUNKS_PER_BAG = 8         # Limit the number of chunks per function to avoid memory issues
 MAX_SEQ_LEN = 512               # Each chunk is a sequence of 512 tokens. If you have enough GPU memory, you can increase this to 1024 or 2048, but be aware of the memory trade-offs.
+STRIDE = 64                     # The number of tokens to slide the window by
 DEBUG = False                    # Set to True for quick debugging with a smaller dataset
 
 # Define the mapping of your splits to the local file paths
@@ -29,6 +32,18 @@ def load_data(data_files: dict[str, str], tokenizer: AutoTokenizer) -> DatasetDi
     # Load the dataset using the 'json' builder
     raw_dataset: DatasetDict = load_dataset("json", data_files=data_files)
     print(raw_dataset)
+
+    def minify_dataset(example: dict[str, Any]) -> dict[str, Any]:
+        # Apply code minification to the 'func' field
+        minified_func = minify_cpp_function(
+            example["func"], 
+            aggressive_whitespace=False,
+            rename_long_identifiers=False
+        )
+        example["func"] = minified_func
+        return example
+
+    min_dataset = raw_dataset.map(minify_dataset)
 
     def tokenize_into_bags(example: dict[str, Any]) -> dict[str, Any]:
         # 1. Tokenize the entire function without truncation and without special tokens
@@ -46,8 +61,8 @@ def load_data(data_files: dict[str, str], tokenizer: AutoTokenizer) -> DatasetDi
         sep_token = tokenizer.sep_token_id or tokenizer.eos_token_id
         pad_token = tokenizer.pad_token_id
         
-        max_length = 512
-        stride = 50
+        max_length = MAX_SEQ_LEN
+        stride = STRIDE
         usable_length = max_length - 2  # Reserve 2 spaces for the CLS and SEP tokens
         step = usable_length - stride
         
@@ -90,7 +105,7 @@ def load_data(data_files: dict[str, str], tokenizer: AutoTokenizer) -> DatasetDi
         }
 
     # Apply without batched=True to keep chunks grouped by their parent function
-    tokenized_dataset = raw_dataset.map(tokenize_into_bags, remove_columns=["func", "commit_id", "target", "hash", "idx"])
+    tokenized_dataset = min_dataset.map(tokenize_into_bags, remove_columns=["func", "commit_id", "target", "hash", "idx"])
     return tokenized_dataset
 
 
@@ -155,12 +170,21 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         tokenized_dataset = DatasetDict({"train": train_set, "validation": eval_set, "test": test_set})
 
     print("Loading the model...")
+    config = AutoConfig.from_pretrained(encoder_name, trust_remote_code=True)
+    config.attention_dropout_prob = 0.0
+    config.residual_dropout_prob = 0.0
+    config.embedding_dropout_prob = 0.0
+
     # Load base CodeSage without the classification head
     base_encoder = AutoModel.from_pretrained(
         encoder_name,
         trust_remote_code=True,
+        config=config,
         torch_dtype=torch.bfloat16  # Loads the frozen weights directly in 16-bit
     )
+
+    num_blocks = enable_codesage_block_checkpointing(base_encoder)
+    print(f"Enabled manual gradient checkpointing on {num_blocks} CodeSageBlock layers.")
 
     # Apply LoRA to the base encoder
     lora_config = LoraConfig(
