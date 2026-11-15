@@ -163,6 +163,8 @@ def save_model(model: AttentionMILCodeSage, out_dir: str):
 
 def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "codesage/codesage-large-v2", dbg = False):
     print("Debug mode: ", dbg)
+    print("Encoder: ", encoder_name)
+    print(f"{MAX_CHUNKS_PER_BAG=}\n{MAX_SEQ_LEN=}\n{OVERLAP=}\n")
     
     tokenizer = AutoTokenizer.from_pretrained(encoder_name, trust_remote_code=True)
 
