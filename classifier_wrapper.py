@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
 
+from cs_checkpointing import enable_codesage_block_checkpointing, disable_codesage_block_checkpointing
+
 
 class GatedAttention(nn.Module):
     """
@@ -48,16 +50,17 @@ class GatedAttention(nn.Module):
 
 
 class AttentionMILCodeSage(nn.Module):
-    def __init__(self, encoder: nn.Module, hidden_size, attention_dim=256, mlp_dropout=0.1):
+    def __init__(self, encoder: nn.Module, hidden_size: int, attention_dim=256, mlp_dropout=0.1):
         super().__init__()
         self.encoder = encoder
         
         # The Attention Network: Learns to score the importance of each chunk
-        self.attention = nn.Sequential(
-            nn.Linear(hidden_size, attention_dim),
-            nn.Tanh(),
-            nn.Linear(attention_dim, 1)
-        )
+        # self.attention = nn.Sequential(
+        #     nn.Linear(hidden_size, attention_dim),
+        #     nn.Tanh(),
+        #     nn.Linear(attention_dim, 1)
+        # )
+        self.attention = GatedAttention(hidden_size, attention_dim)
 
         mlp_hidden_dim = hidden_size // 4  # You can adjust this based on your needs
         self.classifier = nn.Sequential(
@@ -71,12 +74,10 @@ class AttentionMILCodeSage(nn.Module):
         self.loss_fct = nn.BCEWithLogitsLoss() # nn.CrossEntropyLoss()
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
-        self.encoder.gradient_checkpointing_enable(
-            gradient_checkpointing_kwargs=gradient_checkpointing_kwargs
-        )
+        enable_codesage_block_checkpointing(self.encoder)
 
     def gradient_checkpointing_disable(self):
-        self.encoder.gradient_checkpointing_disable()
+        disable_codesage_block_checkpointing(self.encoder)
 
     def forward(self, input_ids, attention_mask, chunk_mask=None, labels=None):
         # Shapes: input_ids -> (batch_size, max_chunks, seq_len)
@@ -93,18 +94,20 @@ class AttentionMILCodeSage(nn.Module):
         # 2. Reshape back into bags -> (batch_size, max_chunks, hidden_size)
         bag_embeddings = chunk_embeddings.view(batch_size, max_chunks, -1)
         
-        # 3. Calculate Attention Scores -> (batch_size, max_chunks)
-        attn_scores = self.attention(bag_embeddings).squeeze(-1) 
+        # # 3. Calculate Attention Scores -> (batch_size, max_chunks)
+        # attn_scores = self.attention(bag_embeddings).squeeze(-1) 
         
-        # Mask out the padding chunks so they receive 0 attention
-        if chunk_mask is not None:
-            attn_scores = attn_scores.masked_fill(chunk_mask == 0, -1e9)
+        # # Mask out the padding chunks so they receive 0 attention
+        # if chunk_mask is not None:
+        #     attn_scores = attn_scores.masked_fill(chunk_mask == 0, -1e9)
             
-        attn_weights = torch.softmax(attn_scores, dim=1) 
+        # attn_weights = torch.softmax(attn_scores, dim=1) 
         
-        # 4. Aggregate chunks into a single function-level embedding
-        # bmm: (batch, 1, max_chunks) x (batch, max_chunks, hidden_size) -> (batch, 1, hidden_size)
-        function_representation = torch.bmm(attn_weights.unsqueeze(1), bag_embeddings).squeeze(1)
+        # # 4. Aggregate chunks into a single function-level embedding
+        # # bmm: (batch, 1, max_chunks) x (batch, max_chunks, hidden_size) -> (batch, 1, hidden_size)
+        # function_representation = torch.bmm(attn_weights.unsqueeze(1), bag_embeddings).squeeze(1)
+
+        function_representation, attn_weights = self.attention(bag_embeddings, chunk_mask)
         
         # 5. Classify the entire function
         logits = self.classifier(function_representation)

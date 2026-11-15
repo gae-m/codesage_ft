@@ -3,23 +3,23 @@ import sys
 from typing import Any, cast
 
 import torch
-from transformers import AutoTokenizer, AutoModel, TrainingArguments, Trainer
+from transformers import AutoTokenizer, AutoModel, TrainingArguments, Trainer, AutoConfig
 from peft import LoraConfig, get_peft_model, PeftModel
-from datasets import load_dataset, DatasetDict
+from datasets import load_dataset, DatasetDict, concatenate_datasets
 from sklearn.metrics import roc_auc_score
 from time import time, perf_counter
 
 from collator import AttentionMILCollator
 from classifier_wrapper import AttentionMILCodeSage
-from cs_checkpointing import enable_codesage_block_checkpointing
+# from cs_checkpointing import enable_codesage_block_checkpointing
 from code_minification import minify_cpp_function
 
 
 ENCODER = "codesage/codesage-large-v2"
-MAX_CHUNKS_PER_BAG = 8         # Limit the number of chunks per function to avoid memory issues
-MAX_SEQ_LEN = 512               # Each chunk is a sequence of 512 tokens. If you have enough GPU memory, you can increase this to 1024 or 2048, but be aware of the memory trade-offs.
-STRIDE = 64                     # The number of tokens to slide the window by
-DEBUG = False                    # Set to True for quick debugging with a smaller dataset
+MAX_CHUNKS_PER_BAG = 8      # Limit the number of chunks per function to avoid memory issues
+MAX_SEQ_LEN = 1024          # Each chunk is a sequence of 512 tokens. If you have enough GPU memory, you can increase this to 1024 or 2048, but be aware of the memory trade-offs.
+STRIDE = 128                # The number of tokens to slide the window by
+DEBUG = True               # Set to True for quick debugging with a smaller dataset
 
 # Define the mapping of your splits to the local file paths
 DATAPATHS = {
@@ -77,7 +77,7 @@ def load_data(data_files: dict[str, str], tokenizer: AutoTokenizer) -> DatasetDi
             chunk_ids = [cls_token] + chunk_code_ids + [sep_token]
             chunk_mask = [1] * len(chunk_ids)
             
-            # Pad the individual chunk to exactly 512 tokens
+            # Pad the individual chunk to exactly MAX_SEQ_LEN tokens
             pad_len = max_length - len(chunk_ids)
             if pad_len > 0:
                 chunk_ids.extend([pad_token] * pad_len)
@@ -94,9 +94,11 @@ def load_data(data_files: dict[str, str], tokenizer: AutoTokenizer) -> DatasetDi
             chunked_attention_mask.append(chunk_mask)
 
         if len(chunked_input_ids) > MAX_CHUNKS_PER_BAG:
-            print(f"Warning: Function {example['idx']} has {len(chunked_input_ids)} chunks, exceeding the limit of {MAX_CHUNKS_PER_BAG}. Truncating to the first {MAX_CHUNKS_PER_BAG} chunks.")
-            chunked_input_ids = chunked_input_ids[:MAX_CHUNKS_PER_BAG]
-            chunked_attention_mask = chunked_attention_mask[:MAX_CHUNKS_PER_BAG]
+            print(f"Warning: Function {example['idx']} has {len(chunked_input_ids)} chunks, exceeding the limit of {MAX_CHUNKS_PER_BAG}. Head-and-Tail truncation to {MAX_CHUNKS_PER_BAG} chunks.")
+            chunked_input_ids = chunked_input_ids[:MAX_CHUNKS_PER_BAG//2] + chunked_input_ids[-(MAX_CHUNKS_PER_BAG//2):]
+            chunked_attention_mask = chunked_attention_mask[:MAX_CHUNKS_PER_BAG//2] + chunked_attention_mask[-(MAX_CHUNKS_PER_BAG//2):]
+            # chunked_input_ids = chunked_input_ids[:MAX_CHUNKS_PER_BAG]
+            # chunked_attention_mask = chunked_attention_mask[:MAX_CHUNKS_PER_BAG]
             
         return {
             "input_ids": chunked_input_ids,
@@ -183,8 +185,8 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         torch_dtype=torch.bfloat16  # Loads the frozen weights directly in 16-bit
     )
 
-    num_blocks = enable_codesage_block_checkpointing(base_encoder)
-    print(f"Enabled manual gradient checkpointing on {num_blocks} CodeSageBlock layers.")
+    # num_blocks = enable_codesage_block_checkpointing(base_encoder)
+    # print(f"Enabled manual gradient checkpointing on {num_blocks} CodeSageBlock layers.")
 
     # Apply LoRA to the base encoder
     lora_config = LoraConfig(
@@ -215,32 +217,38 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
     training_args = TrainingArguments(
         output_dir=out_dir,
         max_steps=3 if dbg else -1,
-        per_device_train_batch_size=1, # Keep batch size small; you are processing (batch * chunks) sequences at once
+        per_device_train_batch_size=1,  # Keep batch size small; you are processing (batch * chunks) sequences at once
+        per_device_eval_batch_size=8,   # You can increase this if you have enough GPU memory
         learning_rate=2e-4,
-        eval_strategy="epoch",
-        gradient_accumulation_steps=16, # Simulate a larger batch size
-        gradient_checkpointing=False, # Save memory by not storing intermediate activations. CodeSage does not support gradient checkpointing natively.
+        gradient_accumulation_steps=8, # Simulate a larger batch size
+        gradient_checkpointing=True,    # Save memory by not storing intermediate activations. CodeSage does not support gradient checkpointing natively.
         warmup_ratio=0.1,
         num_train_epochs=5,
         bf16=bf16_support,
-        metric_for_best_model="auroc",
+        # Logging and evaluation strategies
         logging_steps=50,
         logging_first_step=True,
         report_to=["tensorboard"],
         logging_dir=out_dir,
-        # Crucial: Since our model is custom and doesn't subclass PreTrainedModel cleanly for saving, 
-        # disable standard HF saving and save state_dict manually, or handle carefully.
-        save_strategy="no" 
+        # Save strategies
+        save_strategy="epoch",
+        save_total_limit=1,
+        load_best_model_at_end=False,
+        # Optional: still log validation metrics per epoch without altering model selection
+        eval_strategy="epoch",
+        remove_unused_columns=False
     )
 
     # While CodeSage does have a pad token, some code tokenizers (like GPT-2 base) do not have one set by default.
     if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
 
+    tokenized_dataset["train"] = concatenate_datasets([tokenized_dataset["train"], tokenized_dataset["validation"]])
+
     trainer = Trainer(
         model=mil_model,
         args=training_args,
         train_dataset=tokenized_dataset["train"],
-        eval_dataset=tokenized_dataset["validation"],
+        eval_dataset=tokenized_dataset["test"],
         data_collator=AttentionMILCollator(pad_token_id=tokenizer.pad_token_id),
         compute_metrics=compute_auroc_metrics
     )
