@@ -5,15 +5,14 @@ class AttentionMILCollator:
         self.pad_token_id = pad_token_id
         
     def __call__(self, batch: list[dict]) -> dict[str, torch.Tensor]:
-        labels = torch.tensor([item['label'] for item in batch])
-        
         # Find the maximum number of chunks in this specific batch
         max_chunks = max(len(item['input_ids']) for item in batch)
-        seq_len = len(batch[0]['input_ids'][0]) # Always 512
+        seq_len = len(batch[0]['input_ids'][0])
         
-        batch_input_ids, batch_attention_mask, batch_chunk_mask = [], [], []
+        batch_input_ids, batch_attention_mask, batch_chunk_mask, labels = [], [], [], []
         
         for item in batch:
+            
             num_chunks = len(item['input_ids'])
             
             # chunk_mask tells the attention mechanism which chunks are real vs. padding
@@ -29,10 +28,10 @@ class AttentionMILCollator:
             batch_input_ids.append(padded_input_ids)
             batch_attention_mask.append(padded_attention_mask)
             batch_chunk_mask.append(chunk_mask)
-            
+            labels.append(item['label'])
         return {
             "input_ids": torch.tensor(batch_input_ids),
             "attention_mask": torch.tensor(batch_attention_mask),
             "chunk_mask": torch.tensor(batch_chunk_mask),
-            "labels": labels
+            "labels": torch.tensor(labels)
         }

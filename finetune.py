@@ -1,6 +1,7 @@
 import os
 import sys
 from typing import Any, cast
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import torch
 from transformers import AutoTokenizer, AutoModel, TrainingArguments, Trainer, AutoConfig
@@ -16,10 +17,11 @@ from code_minification import minify_cpp_function
 
 
 ENCODER = "codesage/codesage-large-v2"
-MAX_CHUNKS_PER_BAG = 8      # Limit the number of chunks per function to avoid memory issues
-MAX_SEQ_LEN = 1024          # Each chunk is a sequence of 512 tokens. If you have enough GPU memory, you can increase this to 1024 or 2048, but be aware of the memory trade-offs.
-STRIDE = 128                # The number of tokens to slide the window by
-DEBUG = True               # Set to True for quick debugging with a smaller dataset
+MAX_CHUNKS_PER_BAG = 20             # Limit the number of chunks per function to avoid memory issues
+MAX_SEQ_LEN = 2048                  # Each chunk is a sequence of 512 tokens. If you have enough GPU memory, you can increase this to 1024 or 2048, but be aware of the memory trade-offs.
+OVERLAP = MAX_SEQ_LEN // 4          # Overlap between chunks to ensure context is preserved across chunk boundaries. This is set to 25% of the chunk size, but you can adjust it based on your needs.
+# STRIDE = MAX_SEQ_LEN - OVERLAP
+DEBUG = False                       # Set to True for quick debugging with a smaller dataset
 
 # Define the mapping of your splits to the local file paths
 DATAPATHS = {
@@ -45,6 +47,10 @@ def load_data(data_files: dict[str, str], tokenizer: AutoTokenizer) -> DatasetDi
 
     min_dataset = raw_dataset.map(minify_dataset)
 
+    # TODO: Snap to Structural Boundaries (Crucial)
+    # Standard Hugging Face chunking slices at exact token counts. Slicing source code at exactly token 1024 might cut a variable name in half (e.g., buffer becomes buf and fer) or split an arithmetic condition (if (x <  |  y)).
+    # To fix this, write a custom chunking wrapper that calculates the theoretical stride (e.g., 768), but then scans backward in the original text to snap the cut to the nearest newline (\n) or statement terminator (;, }).
+
     def tokenize_into_bags(example: dict[str, Any]) -> dict[str, Any]:
         # 1. Tokenize the entire function without truncation and without special tokens
         tokenized = tokenizer(
@@ -62,9 +68,9 @@ def load_data(data_files: dict[str, str], tokenizer: AutoTokenizer) -> DatasetDi
         pad_token = tokenizer.pad_token_id
         
         max_length = MAX_SEQ_LEN
-        stride = STRIDE
+        overlap = OVERLAP
         usable_length = max_length - 2  # Reserve 2 spaces for the CLS and SEP tokens
-        step = usable_length - stride
+        step = usable_length - overlap
         
         chunked_input_ids = []
         chunked_attention_mask = []
@@ -78,6 +84,7 @@ def load_data(data_files: dict[str, str], tokenizer: AutoTokenizer) -> DatasetDi
             chunk_mask = [1] * len(chunk_ids)
             
             # Pad the individual chunk to exactly MAX_SEQ_LEN tokens
+            # TODO: review this padding logic to ensure it doesn't introduce unnecessary padding if the chunk is already at max length
             pad_len = max_length - len(chunk_ids)
             if pad_len > 0:
                 chunk_ids.extend([pad_token] * pad_len)
@@ -217,8 +224,9 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
     training_args = TrainingArguments(
         output_dir=out_dir,
         max_steps=3 if dbg else -1,
+        group_by_length=True,           # Useful only if batch_size > 1, like for the eval phase in this case
         per_device_train_batch_size=1,  # Keep batch size small; you are processing (batch * chunks) sequences at once
-        per_device_eval_batch_size=8,   # You can increase this if you have enough GPU memory
+        per_device_eval_batch_size=4,   # You can increase this if you have enough GPU memory
         learning_rate=2e-4,
         gradient_accumulation_steps=8, # Simulate a larger batch size
         gradient_checkpointing=True,    # Save memory by not storing intermediate activations. CodeSage does not support gradient checkpointing natively.
@@ -236,7 +244,10 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         load_best_model_at_end=False,
         # Optional: still log validation metrics per epoch without altering model selection
         eval_strategy="epoch",
-        remove_unused_columns=False
+        remove_unused_columns=False,
+        # Dataloaders ...
+        dataloader_num_workers=4,
+        dataloader_pin_memory=True
     )
 
     # While CodeSage does have a pad token, some code tokenizers (like GPT-2 base) do not have one set by default.
@@ -267,10 +278,10 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
 
     # 2. Evaluate on the Test Set
     print("Running final evaluation on the Test Set...")
-    test_results = trainer.predict(tokenized_dataset["test"])
+    test_results = trainer.evaluate(tokenized_dataset["test"], ignore_keys=["attention_weights"])
 
     # 3. Print the comprehensive metrics
-    for metric_name, value in test_results.metrics.items():
+    for metric_name, value in test_results.items():
         print(f"{metric_name}: {value:.4f}")
 
     # Save only the adapters and the classifier head

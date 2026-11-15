@@ -7,6 +7,14 @@ from transformers import AutoConfig, AutoModel
 from peft import LoraConfig, get_peft_model
 
 
+# TODO: Selective Gradient Checkpointing (The "Cheat Code"):
+# Gradient checkpointing trades computation for VRAM by doing two forward passes. 
+# Because you wrote a custom wrapper, you don't have to checkpoint all 24 blocks. 
+# If you only checkpoint the top 12 blocks (layers 12–23) and leave the bottom 12 blocks (layers 0–11) uncheckpointed, 
+# you use a bit more VRAM to store the bottom activations, but the bottom half of your model runs 33% faster.
+# (Implementation: Add for i, module in enumerate(model.h): and only apply the checkpoint wrapper if i >= 12).
+
+
 def enable_codesage_block_checkpointing(model: nn.Module) -> int:
     """Safely enables non-reentrant gradient checkpointing on all `CodeSageBlock` layers."""
     # Disable use_cache on underlying model configs (handles both raw AutoModel and PeftModel)
