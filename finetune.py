@@ -198,6 +198,11 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         test_set = tokenized_dataset["test"].select(range(min(10, len(tokenized_dataset["test"]))))
         tokenized_dataset = DatasetDict({"train": train_set, "validation": eval_set, "test": test_set})
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    bf16_support = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
+    print("Using device:", device)
+    print("bf16 support:", bf16_support)
+
     print("Loading the model...")
     config = AutoConfig.from_pretrained(encoder_name, trust_remote_code=True)
     config.attention_dropout_prob = 0.0
@@ -209,11 +214,9 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         encoder_name,
         trust_remote_code=True,
         config=config,
-        torch_dtype=torch.bfloat16  # Loads the frozen weights directly in 16-bit
+        torch_dtype=torch.bfloat16 if bf16_support else torch.float32
+        # Loads the frozen weights directly in 16-bit
     )
-
-    # num_blocks = enable_codesage_block_checkpointing(base_encoder)
-    # print(f"Enabled manual gradient checkpointing on {num_blocks} CodeSageBlock layers.")
 
     # Apply LoRA to the base encoder
     lora_config = LoraConfig(
@@ -232,11 +235,6 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
     mil_model = AttentionMILCodeSage(encoder=peft_encoder, hidden_size=base_encoder.config.hidden_size)
 
     print("Model loaded. Preparing for training...")
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    bf16_support = torch.cuda.is_available() and torch.cuda.is_bf16_supported()
-    print("Using device:", device)
-    print("bf16 support:", bf16_support)
 
     mil_model = mil_model.to(device) # Move to GPU
 
@@ -308,7 +306,6 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
     # Save only the adapters and the classifier head
     print(f"Saving the fine-tuned model to {out_dir}...")
     save_model(mil_model, out_dir)
-
 
 
 def load_model(model_dir: str, encoder_name: str = "codesage/codesage-large-v2") -> AttentionMILCodeSage:
