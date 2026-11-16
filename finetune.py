@@ -21,7 +21,7 @@ from data_process import get_code_boundary_token_ids, prepare_mil_dataset
 ENCODER = "codesage/codesage-large-v2"
 DEBUG = False                       # Set to True for quick testing with a smaller dataset and fewer epochs. This is useful for debugging and ensuring your code runs without errors before committing to a full training run.
 
-CHECKPOINTING_RATIO = 1.0           # Checkpoint only this fraction of CodeSage blocks to balance memory and speed
+CHECKPOINTING_RATIO = 0.8          # Checkpoint only this fraction of CodeSage blocks to balance memory and speed
 MAX_CHUNKS_PER_BAG = 20             # Limit the number of chunks per function to avoid memory issues
 MAX_SEQ_LEN = 2048                  # Each chunk is a sequence of 512 tokens. If you have enough GPU memory, you can increase this to 1024 or 2048, but be aware of the memory trade-offs.
 OVERLAP = MAX_SEQ_LEN // 4          # Overlap between chunks to ensure context is preserved across chunk boundaries. This is set to 25% of the chunk size, but you can adjust it based on your needs.
@@ -249,7 +249,7 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         max_steps=3 if dbg else -1,
         group_by_length=True,                             # Useful only if batch_size > 1, like for the eval phase in this case
         per_device_train_batch_size=TRAINING_BATCH_SIZE,  # Keep batch size small; you are processing (batch * chunks) sequences at once
-        per_device_eval_batch_size=4,                     # You can increase this if you have enough GPU memory
+        per_device_eval_batch_size=1,                     # You can increase this if you have enough GPU memory
         learning_rate=2e-4,
         gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,   # Simulate a larger batch size
         gradient_checkpointing=True,                      # Save memory by not storing intermediate activations. CodeSage does not support gradient checkpointing natively.

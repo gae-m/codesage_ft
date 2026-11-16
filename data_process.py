@@ -93,6 +93,7 @@ def prepare_mil_dataset(
 
     # Head-and-Tail truncation if a function still exceeds MAX_CHUNKS_PER_BAG
     if len(chunked_ids) > max_chunks_per_bag:
+        print(f"Function {example['idx']} truncated from {len(chunked_ids)} to {max_chunks_per_bag} chunks (Head-and-Tail).")
         half = max_chunks_per_bag // 2
         chunked_ids = chunked_ids[:half] + chunked_ids[-half:]
 

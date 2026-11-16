@@ -191,7 +191,7 @@ def main():
         bias="none",
     )
     lora_encoder = get_peft_model(base_encoder, lora_config).to(DEVICE)
-    benchmark_checkpoint_ratios(lora_encoder, max_chunks=20, max_seq_len=2048)
+    benchmark_checkpoint_ratios(lora_encoder, max_chunks=20, max_seq_len=2048, ratios=(0.6, 0.7, 0.75))
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA GPU is required for bfloat16 VRAM smoke test.")
@@ -345,4 +345,5 @@ class TestCodeSageBlockCheckpointing(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    main()
     unittest.main(verbosity=2)
