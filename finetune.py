@@ -1,6 +1,7 @@
+import argparse
 import os
 import sys
-from typing import Any, cast
+from typing import cast
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 import torch
@@ -18,11 +19,14 @@ from data_process import get_code_boundary_token_ids, prepare_mil_dataset
 
 
 ENCODER = "codesage/codesage-large-v2"
+CHECKPOINTING_RATIO = 1.0           # Checkpoint only this fraction of CodeSage blocks to balance memory and speed
 MAX_CHUNKS_PER_BAG = 20             # Limit the number of chunks per function to avoid memory issues
 MAX_SEQ_LEN = 2048                  # Each chunk is a sequence of 512 tokens. If you have enough GPU memory, you can increase this to 1024 or 2048, but be aware of the memory trade-offs.
 OVERLAP = MAX_SEQ_LEN // 4          # Overlap between chunks to ensure context is preserved across chunk boundaries. This is set to 25% of the chunk size, but you can adjust it based on your needs.
+TRAINING_BATCH_SIZE = 1             # Each batch contains 1 function, which may consist of multiple chunks. Adjust based on your GPU memory.
 STRIDE = MAX_SEQ_LEN - OVERLAP
-DEBUG = False                       # Set to True for quick debugging with a smaller dataset
+DEBUG = False                       # Set to True for quick testing with a smaller dataset and fewer epochs. This is useful for debugging and ensuring your code runs without errors before committing to a full training run.
+EPOCHS = 5                          # Number of training epochs. You can increase this for better performance, but it will take longer to train.
 
 # Define the mapping of your splits to the local file paths
 DATAPATHS = {
@@ -165,7 +169,7 @@ def save_model(model: AttentionMILCodeSage, out_dir: str):
 def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "codesage/codesage-large-v2", dbg = False):
     print("Debug mode: ", dbg)
     print("Encoder: ", encoder_name)
-    print(f"{MAX_CHUNKS_PER_BAG=}\n{MAX_SEQ_LEN=}\n{OVERLAP=}\n")
+    print(f"{MAX_CHUNKS_PER_BAG=}\n{MAX_SEQ_LEN=}\n{OVERLAP=}\n{TRAINING_BATCH_SIZE=}\n{STRIDE=}\n{CHECKPOINTING_RATIO=}")
     
     tokenizer = AutoTokenizer.from_pretrained(encoder_name, trust_remote_code=True)
 
@@ -240,14 +244,15 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
     training_args = TrainingArguments(
         output_dir=out_dir,
         max_steps=3 if dbg else -1,
-        group_by_length=True,           # Useful only if batch_size > 1, like for the eval phase in this case
-        per_device_train_batch_size=1,  # Keep batch size small; you are processing (batch * chunks) sequences at once
-        per_device_eval_batch_size=4,   # You can increase this if you have enough GPU memory
+        group_by_length=True,                             # Useful only if batch_size > 1, like for the eval phase in this case
+        per_device_train_batch_size=TRAINING_BATCH_SIZE,  # Keep batch size small; you are processing (batch * chunks) sequences at once
+        per_device_eval_batch_size=4,                     # You can increase this if you have enough GPU memory
         learning_rate=2e-4,
-        gradient_accumulation_steps=8, # Simulate a larger batch size
-        gradient_checkpointing=True,    # Save memory by not storing intermediate activations. CodeSage does not support gradient checkpointing natively.
+        gradient_accumulation_steps=8,                    # Simulate a larger batch size
+        gradient_checkpointing=True,                      # Save memory by not storing intermediate activations. CodeSage does not support gradient checkpointing natively.
+        gradient_checkpointing_kwargs={"checkpoint_ratio": CHECKPOINTING_RATIO}, # Checkpoint only CHECKPOINTING_RATIO of the CodeSage blocks to balance memory and speed
         warmup_ratio=0.1,
-        num_train_epochs=5,
+        num_train_epochs=EPOCHS,
         bf16=bf16_support,
         # Logging and evaluation strategies
         logging_steps=50,
@@ -358,9 +363,14 @@ enc_name_map = {
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Fine-tune CodeSage with Attention-MIL on a custom dataset.")
+    parser.add_argument("--dbg", "-d", action="store_true", default=DEBUG, help="Enable debug mode for quick testing.")
+
+    args = parser.parse_args()
+
     # Define the output directory for saving the model
     experiment_name = f"{enc_name_map[ENCODER]}_mil_ft_{int(time())}"
-    if DEBUG:
+    if args.dbg:
         experiment_name = 'dbg_' + experiment_name
 
     out_dir = f"out/{experiment_name}"
@@ -370,7 +380,7 @@ def main():
     sys.stdout = tee
 
     # Fine-tune the model
-    fine_tuning(DATAPATHS, out_dir, encoder_name=ENCODER, dbg=DEBUG)
+    fine_tuning(DATAPATHS, out_dir, encoder_name=ENCODER, dbg=args.dbg)
 
     # Restore original stdout when done
     tee.close()

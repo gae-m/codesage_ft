@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from cs_checkpointing import enable_codesage_block_checkpointing, disable_codesage_block_checkpointing
+from cs_checkpointing import enable_codesage_block_checkpointing, disable_codesage_block_checkpointing, enable_codesage_selective_checkpointing
 
 
 class GatedAttention(nn.Module):
@@ -74,7 +74,11 @@ class AttentionMILCodeSage(nn.Module):
         self.loss_fct = nn.BCEWithLogitsLoss() # nn.CrossEntropyLoss()
 
     def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
-        enable_codesage_block_checkpointing(self.encoder)
+        # enable_codesage_block_checkpointing(self.encoder)
+        enable_codesage_selective_checkpointing(
+            self.encoder, 
+            checkpoint_ratio=gradient_checkpointing_kwargs.get("checkpoint_ratio", 1.0) if gradient_checkpointing_kwargs else 1.0
+        )
 
     def gradient_checkpointing_disable(self):
         disable_codesage_block_checkpointing(self.encoder)

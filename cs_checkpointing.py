@@ -54,6 +54,68 @@ def enable_codesage_block_checkpointing(model: nn.Module) -> int:
     return wrapped_count
 
 
+def enable_codesage_selective_checkpointing(
+    model: nn.Module,
+    checkpoint_ratio: float = 1.0,
+) -> tuple[int, int]:
+    """
+    Applies non-reentrant gradient checkpointing to `checkpoint_ratio` of CodeSageBlock
+    layers, starting from the earliest layers (layer 0 upward) for optimal peak VRAM.
+
+    Args:
+        model: Base CodeSage AutoModel or PeftModel wrapping CodeSage.
+        checkpoint_ratio: Float in [0.0, 1.0].
+            - 1.0 = checkpoint all 24 blocks (minimum VRAM, maximum recompute)
+            - 0.5 = checkpoint blocks 0..11, leave blocks 12..23 uncheckpointed
+            - 0.0 = disable checkpointing completely (maximum speed, maximum VRAM)
+
+    Returns:
+        Tuple of (checkpointed_blocks, total_blocks).
+    """
+    if not 0.0 <= checkpoint_ratio <= 1.0:
+        raise ValueError(f"`checkpoint_ratio` must be between 0.0 and 1.0, got {checkpoint_ratio}")
+
+    # Disable KV cache on underlying config (handles both AutoModel and PeftModel)
+    for mod in model.modules():
+        cfg = getattr(mod, "config", None)
+        if cfg is not None and hasattr(cfg, "use_cache"):
+            cfg.use_cache = False
+
+    blocks = [m for m in model.modules() if m.__class__.__name__ == "CodeSageBlock"]
+    total_blocks = len(blocks)
+    if total_blocks == 0:
+        raise RuntimeError("No `CodeSageBlock` layers found in `model`.")
+
+    # 1. Reset any existing checkpoint wrappers so repeated calls remain idempotent
+    for blk in blocks:
+        if getattr(blk, "_manual_gc_enabled", False):
+            blk.forward = blk._orig_forward
+            delattr(blk, "_orig_forward")
+            blk._manual_gc_enabled = False
+
+    # 2. Wrap the first `num_to_checkpoint` blocks (0 .. num_to_checkpoint - 1)
+    num_to_checkpoint = round(total_blocks * checkpoint_ratio)
+    for blk in blocks[:num_to_checkpoint]:
+        orig_forward = blk.forward
+        sig = inspect.signature(orig_forward)
+
+        def make_checkpointed_forward(fn, signature, module):
+            def checkpointed_forward(*args, **kwargs):
+                if not module.training or not torch.is_grad_enabled():
+                    return fn(*args, **kwargs)
+                bound = signature.bind(*args, **kwargs)
+                bound.apply_defaults()
+                return checkpoint(fn, *bound.args, use_reentrant=False)
+
+            return checkpointed_forward
+
+        blk._orig_forward = orig_forward
+        blk.forward = make_checkpointed_forward(orig_forward, sig, blk)
+        blk._manual_gc_enabled = True
+
+    return num_to_checkpoint, total_blocks
+
+
 def disable_codesage_block_checkpointing(model: nn.Module) -> None:
     """Restores original uncheckpointed `forward` methods on all wrapped `CodeSageBlock` layers."""
     for module in model.modules():
