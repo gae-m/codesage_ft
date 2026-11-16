@@ -1,4 +1,5 @@
 import inspect
+import time
 import unittest
 import torch
 import torch.nn as nn
@@ -123,6 +124,74 @@ def disable_codesage_block_checkpointing(model: nn.Module) -> None:
             module.forward = module._orig_forward
             delattr(module, "_orig_forward")
             module._manual_gc_enabled = False
+
+
+def benchmark_checkpoint_ratios(
+    lora_encoder: nn.Module,
+    max_chunks: int = 16,
+    max_seq_len: int = 1024,
+    ratios: tuple[float, ...] = (0.0, 0.25, 0.5, 0.75, 1.0),
+    device: str = "cuda",
+):
+    lora_encoder.to(device).train()
+    dummy_ids = torch.randint(10, 1000, (max_chunks, max_seq_len), device=device)
+    dummy_mask = torch.ones((max_chunks, max_seq_len), dtype=torch.long, device=device)
+
+    for ratio in ratios:
+        n_ckpt, total = enable_codesage_selective_checkpointing(lora_encoder, checkpoint_ratio=ratio)
+        lora_encoder.zero_grad(set_to_none=True)
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats(device)
+
+        try:
+            # Warmup step
+            out = lora_encoder(input_ids=dummy_ids, attention_mask=dummy_mask)
+            out.last_hidden_state[:, 0, :].float().sum().backward()
+            lora_encoder.zero_grad(set_to_none=True)
+
+            # Timed step
+            torch.cuda.synchronize(device)
+            t0 = time.perf_counter()
+            out = lora_encoder(input_ids=dummy_ids, attention_mask=dummy_mask)
+            out.last_hidden_state[:, 0, :].float().sum().backward()
+            torch.cuda.synchronize(device)
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+
+            peak_gb = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
+            print(f"ratio={ratio:4.2f} ({n_ckpt:2d}/{total} ckpt) | Peak VRAM: {peak_gb:5.2f} GB | Step: {elapsed_ms:6.1f} ms")
+        except torch.cuda.OutOfMemoryError:
+            print(f"ratio={ratio:4.2f} ({n_ckpt:2d}/{total} ckpt) | OOM!")
+            lora_encoder.zero_grad(set_to_none=True)
+            torch.cuda.empty_cache()
+
+
+def main():
+    MODEL_ID = "codesage/codesage-large-v2"
+    DEVICE = "cuda"
+
+    config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True)
+    config.attention_dropout_prob = 0.0
+    config.residual_dropout_prob = 0.0
+    config.embedding_dropout_prob = 0.0
+    config.use_cache = True  # Intentionally True initially to verify the wrapper disables it
+
+    base_encoder = AutoModel.from_pretrained(
+        MODEL_ID,
+        config=config,
+        trust_remote_code=True,
+        torch_dtype=torch.bfloat16,
+    )
+
+    lora_config = LoraConfig(
+        r=16,
+        lora_alpha=32,
+        lora_dropout=0.05,
+        target_modules="all-linear",
+        fan_in_fan_out=True,
+        bias="none",
+    )
+    lora_encoder = get_peft_model(base_encoder, lora_config).to(DEVICE)
+    benchmark_checkpoint_ratios(lora_encoder, max_chunks=20, max_seq_len=2048)
 
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA GPU is required for bfloat16 VRAM smoke test.")
