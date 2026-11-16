@@ -27,6 +27,7 @@ TRAINING_BATCH_SIZE = 1             # Each batch contains 1 function, which may 
 STRIDE = MAX_SEQ_LEN - OVERLAP
 DEBUG = False                       # Set to True for quick testing with a smaller dataset and fewer epochs. This is useful for debugging and ensuring your code runs without errors before committing to a full training run.
 EPOCHS = 5                          # Number of training epochs. You can increase this for better performance, but it will take longer to train.
+DATALOADER_WORKERS = 8              # Number of subprocesses to use for data loading. Adjust based on your CPU cores and memory.
 
 # Define the mapping of your splits to the local file paths
 DATAPATHS = {
@@ -186,7 +187,7 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         },
         remove_columns=["func", "commit_id", "target", "hash", "idx"],
         keep_in_memory=True,
-        num_proc=4
+        num_proc=DATALOADER_WORKERS
     )
     print("Tokenization complete. Dataset overview:")
     print(tokenized_dataset)
@@ -265,7 +266,7 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         eval_strategy="epoch",
         remove_unused_columns=False,
         # Dataloaders ...
-        dataloader_num_workers=4,
+        dataloader_num_workers=DATALOADER_WORKERS,
         dataloader_pin_memory=True
     )
 
