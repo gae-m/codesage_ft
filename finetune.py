@@ -14,13 +14,14 @@ from collator import AttentionMILCollator
 from classifier_wrapper import AttentionMILCodeSage
 # from cs_checkpointing import enable_codesage_block_checkpointing
 from code_minification import minify_cpp_function
+from data_process import get_code_boundary_token_ids, prepare_mil_dataset
 
 
 ENCODER = "codesage/codesage-large-v2"
 MAX_CHUNKS_PER_BAG = 20             # Limit the number of chunks per function to avoid memory issues
 MAX_SEQ_LEN = 2048                  # Each chunk is a sequence of 512 tokens. If you have enough GPU memory, you can increase this to 1024 or 2048, but be aware of the memory trade-offs.
 OVERLAP = MAX_SEQ_LEN // 4          # Overlap between chunks to ensure context is preserved across chunk boundaries. This is set to 25% of the chunk size, but you can adjust it based on your needs.
-# STRIDE = MAX_SEQ_LEN - OVERLAP
+STRIDE = MAX_SEQ_LEN - OVERLAP
 DEBUG = False                       # Set to True for quick debugging with a smaller dataset
 
 # Define the mapping of your splits to the local file paths
@@ -30,92 +31,92 @@ DATAPATHS = {
     "test": r"data/processed/primevul/primevul_test_paired.jsonl"
 }
 
-def load_data(data_files: dict[str, str], tokenizer: AutoTokenizer) -> DatasetDict:
-    # Load the dataset using the 'json' builder
-    raw_dataset: DatasetDict = load_dataset("json", data_files=data_files)
-    print(raw_dataset)
+# def load_data(data_files: dict[str, str], tokenizer: AutoTokenizer) -> DatasetDict:
+#     # Load the dataset using the 'json' builder
+#     raw_dataset: DatasetDict = load_dataset("json", data_files=data_files)
+#     print(raw_dataset)
 
-    def minify_dataset(example: dict[str, Any]) -> dict[str, Any]:
-        # Apply code minification to the 'func' field
-        minified_func = minify_cpp_function(
-            example["func"], 
-            aggressive_whitespace=False,
-            rename_long_identifiers=False
-        )
-        example["func"] = minified_func
-        return example
+#     def minify_dataset(example: dict[str, Any]) -> dict[str, Any]:
+#         # Apply code minification to the 'func' field
+#         minified_func = minify_cpp_function(
+#             example["func"], 
+#             aggressive_whitespace=False,
+#             rename_long_identifiers=False
+#         )
+#         example["func"] = minified_func
+#         return example
 
-    min_dataset = raw_dataset.map(minify_dataset)
+#     min_dataset = raw_dataset.map(minify_dataset)
 
-    # TODO: Snap to Structural Boundaries (Crucial)
-    # Standard Hugging Face chunking slices at exact token counts. Slicing source code at exactly token 1024 might cut a variable name in half (e.g., buffer becomes buf and fer) or split an arithmetic condition (if (x <  |  y)).
-    # To fix this, write a custom chunking wrapper that calculates the theoretical stride (e.g., 768), but then scans backward in the original text to snap the cut to the nearest newline (\n) or statement terminator (;, }).
+#     # TODO: Snap to Structural Boundaries (Crucial)
+#     # Standard Hugging Face chunking slices at exact token counts. Slicing source code at exactly token 1024 might cut a variable name in half (e.g., buffer becomes buf and fer) or split an arithmetic condition (if (x <  |  y)).
+#     # To fix this, write a custom chunking wrapper that calculates the theoretical stride (e.g., 768), but then scans backward in the original text to snap the cut to the nearest newline (\n) or statement terminator (;, }).
 
-    def tokenize_into_bags(example: dict[str, Any]) -> dict[str, Any]:
-        # 1. Tokenize the entire function without truncation and without special tokens
-        tokenized = tokenizer(
-            example["func"], 
-            truncation=False, 
-            padding=False,
-            add_special_tokens=False 
-        )
+#     def tokenize_into_bags(example: dict[str, Any]) -> dict[str, Any]:
+#         # 1. Tokenize the entire function without truncation and without special tokens
+#         tokenized = tokenizer(
+#             example["func"], 
+#             truncation=False, 
+#             padding=False,
+#             add_special_tokens=False 
+#         )
         
-        raw_input_ids = tokenized["input_ids"]
+#         raw_input_ids = tokenized["input_ids"]
         
-        # 2. Identify special tokens for CodeSage (defaults to <s>/</s> or [CLS]/[SEP])
-        cls_token = tokenizer.cls_token_id or tokenizer.bos_token_id
-        sep_token = tokenizer.sep_token_id or tokenizer.eos_token_id
-        pad_token = tokenizer.pad_token_id
+#         # 2. Identify special tokens for CodeSage (defaults to <s>/</s> or [CLS]/[SEP])
+#         cls_token = tokenizer.cls_token_id or tokenizer.bos_token_id
+#         sep_token = tokenizer.sep_token_id or tokenizer.eos_token_id
+#         pad_token = tokenizer.pad_token_id
         
-        max_length = MAX_SEQ_LEN
-        overlap = OVERLAP
-        usable_length = max_length - 2  # Reserve 2 spaces for the CLS and SEP tokens
-        step = usable_length - overlap
+#         max_length = MAX_SEQ_LEN
+#         overlap = OVERLAP
+#         usable_length = max_length - 2  # Reserve 2 spaces for the CLS and SEP tokens
+#         step = usable_length - overlap
         
-        chunked_input_ids = []
-        chunked_attention_mask = []
+#         chunked_input_ids = []
+#         chunked_attention_mask = []
         
-        # 3. Slide the window to create properly formatted 2D chunks
-        for i in range(0, len(raw_input_ids), step):
-            chunk_code_ids = raw_input_ids[i : i + usable_length]
+#         # 3. Slide the window to create properly formatted 2D chunks
+#         for i in range(0, len(raw_input_ids), step):
+#             chunk_code_ids = raw_input_ids[i : i + usable_length]
             
-            # Manually inject [CLS] at the start and [SEP] at the end
-            chunk_ids = [cls_token] + chunk_code_ids + [sep_token]
-            chunk_mask = [1] * len(chunk_ids)
+#             # Manually inject [CLS] at the start and [SEP] at the end
+#             chunk_ids = [cls_token] + chunk_code_ids + [sep_token]
+#             chunk_mask = [1] * len(chunk_ids)
             
-            # Pad the individual chunk to exactly MAX_SEQ_LEN tokens
-            # TODO: review this padding logic to ensure it doesn't introduce unnecessary padding if the chunk is already at max length
-            pad_len = max_length - len(chunk_ids)
-            if pad_len > 0:
-                chunk_ids.extend([pad_token] * pad_len)
-                chunk_mask.extend([0] * pad_len)
+#             # Pad the individual chunk to exactly MAX_SEQ_LEN tokens
+#             # TODO: review this padding logic to ensure it doesn't introduce unnecessary padding if the chunk is already at max length
+#             pad_len = max_length - len(chunk_ids)
+#             if pad_len > 0:
+#                 chunk_ids.extend([pad_token] * pad_len)
+#                 chunk_mask.extend([0] * pad_len)
                 
-            chunked_input_ids.append(chunk_ids)
-            chunked_attention_mask.append(chunk_mask)
+#             chunked_input_ids.append(chunk_ids)
+#             chunked_attention_mask.append(chunk_mask)
                 
-        # Handle the edge case of an empty string
-        if not chunked_input_ids:
-            chunk_ids = [cls_token, sep_token] + [pad_token] * (max_length - 2)
-            chunk_mask = [1, 1] + [0] * (max_length - 2)
-            chunked_input_ids.append(chunk_ids)
-            chunked_attention_mask.append(chunk_mask)
+#         # Handle the edge case of an empty string
+#         if not chunked_input_ids:
+#             chunk_ids = [cls_token, sep_token] + [pad_token] * (max_length - 2)
+#             chunk_mask = [1, 1] + [0] * (max_length - 2)
+#             chunked_input_ids.append(chunk_ids)
+#             chunked_attention_mask.append(chunk_mask)
 
-        if len(chunked_input_ids) > MAX_CHUNKS_PER_BAG:
-            print(f"Warning: Function {example['idx']} has {len(chunked_input_ids)} chunks, exceeding the limit of {MAX_CHUNKS_PER_BAG}. Head-and-Tail truncation to {MAX_CHUNKS_PER_BAG} chunks.")
-            chunked_input_ids = chunked_input_ids[:MAX_CHUNKS_PER_BAG//2] + chunked_input_ids[-(MAX_CHUNKS_PER_BAG//2):]
-            chunked_attention_mask = chunked_attention_mask[:MAX_CHUNKS_PER_BAG//2] + chunked_attention_mask[-(MAX_CHUNKS_PER_BAG//2):]
-            # chunked_input_ids = chunked_input_ids[:MAX_CHUNKS_PER_BAG]
-            # chunked_attention_mask = chunked_attention_mask[:MAX_CHUNKS_PER_BAG]
+#         if len(chunked_input_ids) > MAX_CHUNKS_PER_BAG:
+#             print(f"Warning: Function {example['idx']} has {len(chunked_input_ids)} chunks, exceeding the limit of {MAX_CHUNKS_PER_BAG}. Head-and-Tail truncation to {MAX_CHUNKS_PER_BAG} chunks.")
+#             chunked_input_ids = chunked_input_ids[:MAX_CHUNKS_PER_BAG//2] + chunked_input_ids[-(MAX_CHUNKS_PER_BAG//2):]
+#             chunked_attention_mask = chunked_attention_mask[:MAX_CHUNKS_PER_BAG//2] + chunked_attention_mask[-(MAX_CHUNKS_PER_BAG//2):]
+#             # chunked_input_ids = chunked_input_ids[:MAX_CHUNKS_PER_BAG]
+#             # chunked_attention_mask = chunked_attention_mask[:MAX_CHUNKS_PER_BAG]
             
-        return {
-            "input_ids": chunked_input_ids,
-            "attention_mask": chunked_attention_mask,
-            "label": example["target"]
-        }
+#         return {
+#             "input_ids": chunked_input_ids,
+#             "attention_mask": chunked_attention_mask,
+#             "label": example["target"]
+#         }
 
-    # Apply without batched=True to keep chunks grouped by their parent function
-    tokenized_dataset = min_dataset.map(tokenize_into_bags, remove_columns=["func", "commit_id", "target", "hash", "idx"])
-    return tokenized_dataset
+#     # Apply without batched=True to keep chunks grouped by their parent function
+#     tokenized_dataset = min_dataset.map(tokenize_into_bags, remove_columns=["func", "commit_id", "target", "hash", "idx"])
+#     return tokenized_dataset
 
 
 def compute_auroc_metrics(eval_pred):
@@ -169,7 +170,20 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
     tokenizer = AutoTokenizer.from_pretrained(encoder_name, trust_remote_code=True)
 
     print("Loading and tokenizing dataset...")
-    tokenized_dataset = load_data(data_files, tokenizer)
+    raw_dataset: DatasetDict = load_dataset("json", data_files=data_files) # type: ignore
+    tokenized_dataset = raw_dataset.map(
+        prepare_mil_dataset,
+        fn_kwargs={
+            "tokenizer": tokenizer,
+            "seq_len": MAX_SEQ_LEN,
+            "stride": STRIDE,
+            "max_chunks_per_bag": MAX_CHUNKS_PER_BAG,
+            "boundary_ids": get_code_boundary_token_ids(tokenizer)
+        },
+        remove_columns=["func", "commit_id", "target", "hash", "idx"],
+        keep_in_memory=True,
+        num_proc=4
+    )
     print("Tokenization complete. Dataset overview:")
     print(tokenized_dataset)
 
@@ -262,7 +276,7 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         args=training_args,
         train_dataset=tokenized_dataset["train"],
         eval_dataset=tokenized_dataset["test"],
-        data_collator=AttentionMILCollator(pad_token_id=tokenizer.pad_token_id),
+        data_collator=AttentionMILCollator(pad_token_id=tokenizer.pad_token_id, empty_chunk_ids=tokenizer.build_inputs_with_special_tokens([])),
         compute_metrics=compute_auroc_metrics
     )
 
@@ -280,7 +294,7 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
 
     # 2. Evaluate on the Test Set
     print("Running final evaluation on the Test Set...")
-    test_results = trainer.evaluate(tokenized_dataset["test"], ignore_keys=["attention_weights"])
+    test_results = trainer.evaluate(tokenized_dataset["test"], ignore_keys=["attention_weights"]) # type: ignore
 
     # 3. Print the comprehensive metrics
     for metric_name, value in test_results.items():
