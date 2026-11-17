@@ -41,7 +41,7 @@ def inspect_mil_checkpoint(ckpt_dir: str, prev_ckpt_dir: str | None = None):
 
                 print(
                     f"{k:<68} | shape={str(tuple(t.shape)):<14} | dtype={str(t.dtype):<14} "
-                    f"| abs_max={tf.abs().max().item():.6f} | std={tf.std(correction=0).item():.6f}{delta_str}"
+                    f"| abs_max={tf.abs().max().item():.6f} | std={tf.std().item():.6f}{delta_str}"
                 )
 
 

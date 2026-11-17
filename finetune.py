@@ -172,9 +172,9 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
     print("Encoder: ", encoder_name)
     print(f"{MAX_CHUNKS_PER_BAG=}\n{MAX_SEQ_LEN=}\n{OVERLAP=}\n{TRAINING_BATCH_SIZE=}\n{STRIDE=}\n{CHECKPOINTING_RATIO=}")
     
-    tokenizer = AutoTokenizer.from_pretrained(encoder_name, trust_remote_code=True)
-
     print("Loading and tokenizing dataset...")
+    tokenizer = AutoTokenizer.from_pretrained(encoder_name, trust_remote_code=True, add_eos_token=True)
+
     raw_dataset: DatasetDict = load_dataset("json", data_files=data_files) # type: ignore
     tokenized_dataset = raw_dataset.map(
         prepare_mil_dataset,

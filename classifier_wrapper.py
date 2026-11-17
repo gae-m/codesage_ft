@@ -92,8 +92,13 @@ class AttentionMILCodeSage(nn.Module):
         flat_attention_mask = attention_mask.view(-1, seq_len)
         
         outputs = self.encoder(input_ids=flat_input_ids, attention_mask=flat_attention_mask)
-        # Extract the [CLS] embedding for every chunk
-        chunk_embeddings = outputs.last_hidden_state[:, 0, :] 
+        # Masked mean pooling in float32 (matches CodeSage-v2 pretraining & avoids bfloat16/float32 mismatches)
+        token_embeddings = outputs.last_hidden_state.float()
+        mask_expanded = flat_attention_mask.unsqueeze(-1).float()
+        chunk_embeddings = (
+            (token_embeddings * mask_expanded).sum(dim=1)
+            / mask_expanded.sum(dim=1).clamp(min=1.0)
+        )
         
         # 2. Reshape back into bags -> (batch_size, max_chunks, hidden_size)
         bag_embeddings = chunk_embeddings.view(batch_size, max_chunks, -1)
@@ -127,6 +132,6 @@ class AttentionMILCodeSage(nn.Module):
         }
 
         if not self.training:
-            out["attention_weights"] = function_representation
+            out["attention_weights"] = attn_weights
             
         return out
