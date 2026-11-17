@@ -120,5 +120,13 @@ class AttentionMILCodeSage(nn.Module):
         loss = None
         if labels is not None:
             loss = self.loss_fct(logits, labels.float().view_as(logits))
+
+        out = {
+            "loss": loss, 
+            "logits": logits
+        }
+
+        if not self.training:
+            out["attention_weights"] = function_representation
             
-        return {"loss": loss, "logits": logits, "attention_weights": attn_weights}
+        return out

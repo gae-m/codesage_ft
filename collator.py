@@ -46,7 +46,7 @@ class AttentionMILCollator:
         max_chunks = max(len(f["input_ids"]) for f in batch)
         raw_max_seq = max(len(chunk) for f in batch for chunk in f["input_ids"])
         # Pad sequence dimension to a multiple of 8 for Tensor Core alignment
-        max_seq_len = ((raw_max_seq + 7) // 8) * 8
+        max_seq_len = ((raw_max_seq + 63) // 64) * 64
 
         # Create a dummy chunk with padding
         len_empty_chunk = len(self.empty_chunk_ids)
