@@ -92,51 +92,14 @@ def enable_codesage_selective_checkpointing(
         orig_forward = blk.forward
         sig = inspect.signature(orig_forward)
 
-        # def make_checkpointed_forward(fn, signature, module):
-        #     def checkpointed_forward(*args, **kwargs):
-        #         if not module.training or not torch.is_grad_enabled():
-        #             return fn(*args, **kwargs)
-        #         bound = signature.bind(*args, **kwargs)
-        #         bound.apply_defaults()
-        #         return checkpoint(fn, *bound.args, use_reentrant=False)
-
-        #     return checkpointed_forward
-
-        def make_checkpointed_forward(fn, module):
-            def checkpointed_forward(
-                hidden_states,
-                layer_past=None,
-                attention_mask=None,
-                head_mask=None,
-                encoder_hidden_states=None,
-                encoder_attention_mask=None,
-                use_cache=False,
-                output_attentions=False,
-            ):
+        def make_checkpointed_forward(fn, signature, module):
+            def checkpointed_forward(*args, **kwargs):
                 if not module.training or not torch.is_grad_enabled():
-                    return fn(
-                        hidden_states,
-                        layer_past=layer_past,
-                        attention_mask=attention_mask,
-                        head_mask=head_mask,
-                        encoder_hidden_states=encoder_hidden_states,
-                        encoder_attention_mask=encoder_attention_mask,
-                        use_cache=use_cache,
-                        output_attentions=output_attentions,
-                    )
-                return checkpoint(
-                    fn,
-                    hidden_states,
-                    layer_past,
-                    attention_mask,
-                    head_mask,
-                    encoder_hidden_states,
-                    encoder_attention_mask,
-                    use_cache,
-                    output_attentions,
-                    use_reentrant=False,
-                )
-            
+                    return fn(*args, **kwargs)
+                bound = signature.bind(*args, **kwargs)
+                bound.apply_defaults()
+                return checkpoint(fn, *bound.args, use_reentrant=False)
+
             return checkpointed_forward
 
         blk._orig_forward = orig_forward

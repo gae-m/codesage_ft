@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from cs_checkpointing import enable_codesage_block_checkpointing, disable_codesage_block_checkpointing, enable_codesage_selective_checkpointing
+from cs_checkpointing import disable_codesage_block_checkpointing, enable_codesage_selective_checkpointing
 
 
 class GatedAttention(nn.Module):

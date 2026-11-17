@@ -21,8 +21,8 @@ torch.set_float32_matmul_precision('high')  # Ensure high precision for matmul o
 ENCODER = "codesage/codesage-large-v2"
 DEBUG = False                       # Set to True for quick testing with a smaller dataset and fewer epochs. This is useful for debugging and ensuring your code runs without errors before committing to a full training run.
 
-CHECKPOINTING_RATIO = 0.8          # Checkpoint only this fraction of CodeSage blocks to balance memory and speed
-MAX_CHUNKS_PER_BAG = 20             # Limit the number of chunks per function to avoid memory issues
+CHECKPOINTING_RATIO = 0.6         # Checkpoint only this fraction of CodeSage blocks to balance memory and speed
+MAX_CHUNKS_PER_BAG = 29            # Limit the number of chunks per function to avoid memory issues
 MAX_SEQ_LEN = 1024                  # Each chunk is a sequence of 512 tokens. If you have enough GPU memory, you can increase this to 1024 or 2048, but be aware of the memory trade-offs.
 OVERLAP = MAX_SEQ_LEN // 4          # Overlap between chunks to ensure context is preserved across chunk boundaries. This is set to 25% of the chunk size, but you can adjust it based on your needs.
 STRIDE = MAX_SEQ_LEN - OVERLAP
@@ -31,7 +31,7 @@ TRAINING_BATCH_SIZE = 1             # Each batch contains 1 function, which may 
 GRADIENT_ACCUMULATION_STEPS = 16     # Accumulate gradients over this many steps to simulate a larger batch size. This is useful when your GPU memory is limited.
 LR_WARMUP_RATIO = 0.1               # Proportion of total optimizer steps to use for learning rate warmup.
 
-DATALOADER_WORKERS = 4              # Number of subprocesses to use for data loading. Adjust based on your CPU cores and memory.
+DATALOADER_WORKERS = 8              # Number of subprocesses to use for data loading. Adjust based on your CPU cores and memory.
 
 # Define the mapping of your splits to the local file paths
 DATAPATHS = {
@@ -254,7 +254,7 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         num_train_epochs=EPOCHS,
         bf16=bf16_support,
         # Logging and evaluation strategies
-        logging_steps=50,
+        logging_steps=64,
         logging_first_step=True,
         report_to=["tensorboard"],
         logging_dir=out_dir,
