@@ -269,8 +269,6 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         dataloader_num_workers=DATALOADER_WORKERS,
         dataloader_persistent_workers=True,
         dataloader_pin_memory=True
-        # Enable PyTorch compilation for faster execution
-        torch_compile=False,  
     )
 
     # While CodeSage does have a pad token, some code tokenizers (like GPT-2 base) do not have one set by default.
