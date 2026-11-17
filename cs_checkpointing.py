@@ -8,51 +8,43 @@ from transformers import AutoConfig, AutoModel
 from peft import LoraConfig, get_peft_model
 
 
-# TODO: Selective Gradient Checkpointing (The "Cheat Code"):
-# Gradient checkpointing trades computation for VRAM by doing two forward passes. 
-# Because you wrote a custom wrapper, you don't have to checkpoint all 24 blocks. 
-# If you only checkpoint the top 12 blocks (layers 12–23) and leave the bottom 12 blocks (layers 0–11) uncheckpointed, 
-# you use a bit more VRAM to store the bottom activations, but the bottom half of your model runs 33% faster.
-# (Implementation: Add for i, module in enumerate(model.h): and only apply the checkpoint wrapper if i >= 12).
+# def enable_codesage_block_checkpointing(model: nn.Module) -> int:
+#     """Safely enables non-reentrant gradient checkpointing on all `CodeSageBlock` layers."""
+#     # Disable use_cache on underlying model configs (handles both raw AutoModel and PeftModel)
+#     for mod in model.modules():
+#         cfg = getattr(mod, "config", None)
+#         if cfg is not None and hasattr(cfg, "use_cache"):
+#             cfg.use_cache = False
 
+#     wrapped_count = 0
+#     for module in model.modules():
+#         if module.__class__.__name__ != "CodeSageBlock":
+#             continue
+#         if getattr(module, "_manual_gc_enabled", False):
+#             wrapped_count += 1
+#             continue
 
-def enable_codesage_block_checkpointing(model: nn.Module) -> int:
-    """Safely enables non-reentrant gradient checkpointing on all `CodeSageBlock` layers."""
-    # Disable use_cache on underlying model configs (handles both raw AutoModel and PeftModel)
-    for mod in model.modules():
-        cfg = getattr(mod, "config", None)
-        if cfg is not None and hasattr(cfg, "use_cache"):
-            cfg.use_cache = False
+#         orig_forward = module.forward
+#         sig = inspect.signature(orig_forward)
 
-    wrapped_count = 0
-    for module in model.modules():
-        if module.__class__.__name__ != "CodeSageBlock":
-            continue
-        if getattr(module, "_manual_gc_enabled", False):
-            wrapped_count += 1
-            continue
+#         def make_checkpointed_forward(fn, signature, blk):
+#             def checkpointed_forward(*args, **kwargs):
+#                 if not blk.training or not torch.is_grad_enabled():
+#                     return fn(*args, **kwargs)
+#                 bound = signature.bind(*args, **kwargs)
+#                 bound.apply_defaults()
+#                 return checkpoint(fn, *bound.args, use_reentrant=False)
 
-        orig_forward = module.forward
-        sig = inspect.signature(orig_forward)
+#             return checkpointed_forward
 
-        def make_checkpointed_forward(fn, signature, blk):
-            def checkpointed_forward(*args, **kwargs):
-                if not blk.training or not torch.is_grad_enabled():
-                    return fn(*args, **kwargs)
-                bound = signature.bind(*args, **kwargs)
-                bound.apply_defaults()
-                return checkpoint(fn, *bound.args, use_reentrant=False)
+#         module._orig_forward = orig_forward
+#         module.forward = make_checkpointed_forward(orig_forward, sig, module)
+#         module._manual_gc_enabled = True
+#         wrapped_count += 1
 
-            return checkpointed_forward
-
-        module._orig_forward = orig_forward
-        module.forward = make_checkpointed_forward(orig_forward, sig, module)
-        module._manual_gc_enabled = True
-        wrapped_count += 1
-
-    if wrapped_count == 0:
-        raise RuntimeError("No `CodeSageBlock` modules found in model.")
-    return wrapped_count
+#     if wrapped_count == 0:
+#         raise RuntimeError("No `CodeSageBlock` modules found in model.")
+#     return wrapped_count
 
 
 def enable_codesage_selective_checkpointing(
@@ -100,14 +92,51 @@ def enable_codesage_selective_checkpointing(
         orig_forward = blk.forward
         sig = inspect.signature(orig_forward)
 
-        def make_checkpointed_forward(fn, signature, module):
-            def checkpointed_forward(*args, **kwargs):
-                if not module.training or not torch.is_grad_enabled():
-                    return fn(*args, **kwargs)
-                bound = signature.bind(*args, **kwargs)
-                bound.apply_defaults()
-                return checkpoint(fn, *bound.args, use_reentrant=False)
+        # def make_checkpointed_forward(fn, signature, module):
+        #     def checkpointed_forward(*args, **kwargs):
+        #         if not module.training or not torch.is_grad_enabled():
+        #             return fn(*args, **kwargs)
+        #         bound = signature.bind(*args, **kwargs)
+        #         bound.apply_defaults()
+        #         return checkpoint(fn, *bound.args, use_reentrant=False)
 
+        #     return checkpointed_forward
+
+        def make_checkpointed_forward(fn, module):
+            def checkpointed_forward(
+                hidden_states,
+                layer_past=None,
+                attention_mask=None,
+                head_mask=None,
+                encoder_hidden_states=None,
+                encoder_attention_mask=None,
+                use_cache=False,
+                output_attentions=False,
+            ):
+                if not module.training or not torch.is_grad_enabled():
+                    return fn(
+                        hidden_states,
+                        layer_past=layer_past,
+                        attention_mask=attention_mask,
+                        head_mask=head_mask,
+                        encoder_hidden_states=encoder_hidden_states,
+                        encoder_attention_mask=encoder_attention_mask,
+                        use_cache=use_cache,
+                        output_attentions=output_attentions,
+                    )
+                return checkpoint(
+                    fn,
+                    hidden_states,
+                    layer_past,
+                    attention_mask,
+                    head_mask,
+                    encoder_hidden_states,
+                    encoder_attention_mask,
+                    use_cache,
+                    output_attentions,
+                    use_reentrant=False,
+                )
+            
             return checkpointed_forward
 
         blk._orig_forward = orig_forward

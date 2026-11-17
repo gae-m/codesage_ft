@@ -16,22 +16,22 @@ from classifier_wrapper import AttentionMILCodeSage
 # from cs_checkpointing import enable_codesage_block_checkpointing
 from code_minification import minify_cpp_function
 from data_process import get_code_boundary_token_ids, prepare_mil_dataset
-
+torch.set_float32_matmul_precision('high')  # Ensure high precision for matmul operations, especially on Ampere and newer GPUs
 
 ENCODER = "codesage/codesage-large-v2"
 DEBUG = False                       # Set to True for quick testing with a smaller dataset and fewer epochs. This is useful for debugging and ensuring your code runs without errors before committing to a full training run.
 
 CHECKPOINTING_RATIO = 0.8          # Checkpoint only this fraction of CodeSage blocks to balance memory and speed
 MAX_CHUNKS_PER_BAG = 20             # Limit the number of chunks per function to avoid memory issues
-MAX_SEQ_LEN = 2048                  # Each chunk is a sequence of 512 tokens. If you have enough GPU memory, you can increase this to 1024 or 2048, but be aware of the memory trade-offs.
+MAX_SEQ_LEN = 1024                  # Each chunk is a sequence of 512 tokens. If you have enough GPU memory, you can increase this to 1024 or 2048, but be aware of the memory trade-offs.
 OVERLAP = MAX_SEQ_LEN // 4          # Overlap between chunks to ensure context is preserved across chunk boundaries. This is set to 25% of the chunk size, but you can adjust it based on your needs.
 STRIDE = MAX_SEQ_LEN - OVERLAP
 EPOCHS = 5                          # Number of training epochs. You can increase this for better performance, but it will take longer to train.
 TRAINING_BATCH_SIZE = 1             # Each batch contains 1 function, which may consist of multiple chunks. Adjust based on your GPU memory.
-GRADIENT_ACCUMULATION_STEPS = 8     # Accumulate gradients over this many steps to simulate a larger batch size. This is useful when your GPU memory is limited.
+GRADIENT_ACCUMULATION_STEPS = 16     # Accumulate gradients over this many steps to simulate a larger batch size. This is useful when your GPU memory is limited.
 LR_WARMUP_RATIO = 0.1               # Proportion of total optimizer steps to use for learning rate warmup.
 
-DATALOADER_WORKERS = 8              # Number of subprocesses to use for data loading. Adjust based on your CPU cores and memory.
+DATALOADER_WORKERS = 4              # Number of subprocesses to use for data loading. Adjust based on your CPU cores and memory.
 
 # Define the mapping of your splits to the local file paths
 DATAPATHS = {
@@ -56,10 +56,6 @@ DATAPATHS = {
 #         return example
 
 #     min_dataset = raw_dataset.map(minify_dataset)
-
-#     # TODO: Snap to Structural Boundaries (Crucial)
-#     # Standard Hugging Face chunking slices at exact token counts. Slicing source code at exactly token 1024 might cut a variable name in half (e.g., buffer becomes buf and fer) or split an arithmetic condition (if (x <  |  y)).
-#     # To fix this, write a custom chunking wrapper that calculates the theoretical stride (e.g., 768), but then scans backward in the original text to snap the cut to the nearest newline (\n) or statement terminator (;, }).
 
 #     def tokenize_into_bags(example: dict[str, Any]) -> dict[str, Any]:
 #         # 1. Tokenize the entire function without truncation and without special tokens
@@ -271,7 +267,10 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         remove_unused_columns=False,
         # Dataloaders ...
         dataloader_num_workers=DATALOADER_WORKERS,
+        dataloader_persistent_workers=True,
         dataloader_pin_memory=True
+        # Enable PyTorch compilation for faster execution
+        torch_compile=False,  
     )
 
     # While CodeSage does have a pad token, some code tokenizers (like GPT-2 base) do not have one set by default.
