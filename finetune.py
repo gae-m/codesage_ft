@@ -10,6 +10,7 @@ from peft import LoraConfig, get_peft_model, PeftModel
 from datasets import load_dataset, DatasetDict, concatenate_datasets
 from sklearn.metrics import roc_auc_score
 from time import time, perf_counter
+import mulitprocessing
 
 from collator import AttentionMILCollator
 from classifier_wrapper import AttentionMILCodeSage
@@ -336,18 +337,25 @@ def load_model(model_dir: str, encoder_name: str = "codesage/codesage-large-v2")
 
 
 class Tee:
-    def __init__(self, filename, mode="a"):
+    def __init__(self, filename, lock: multiprocessing.Lock, mode="a"):
+        self.lock = lock
         self.file = open(filename, mode, encoding="utf-8")
         self.stdout = sys.stdout
 
     def write(self, data):
-        self.stdout.write(data)
-        self.file.write(data)
+        with self.lock:
+            self.stdout.write(data)
+            self.file.write(data)
+            self._flush()
+
+    def _flush(self):
+        self.stdout.flush()
+        self.file.flush()
 
     def flush(self):
         # Ensures real-time output without buffering delays
-        self.stdout.flush()
-        self.file.flush()
+        with self.lock:
+            self._flush()
 
     def close(self):
         sys.stdout = self.stdout
