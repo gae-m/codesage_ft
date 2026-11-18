@@ -4,6 +4,35 @@ import torch.nn as nn
 from cs_checkpointing import disable_codesage_block_checkpointing, enable_codesage_selective_checkpointing
 
 
+class ResidualTokenAttentionPooling(nn.Module):
+    """
+    Preserves CodeSage's native masked mean pooling while adding a zero-initialized,
+    regularized token-attention residual to amplify subtle patch edits.
+    """
+
+    def __init__(self, hidden_size: int, dropout_prob: float):
+        super().__init__()
+        # `bias=False` because softmax is shift-invariant (a bias term would have zero grad forever)
+        self.token_scorer = nn.Linear(hidden_size, 1, bias=False)
+        nn.init.zeros_(self.token_scorer.weight)
+        self.attn_dropout = nn.Dropout(dropout_prob)
+
+    def forward(self, token_embeddings: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
+        h = token_embeddings.float()
+        mask_f = attention_mask.float()
+
+        # 1. Exact CodeSage masked mean pooling (never lost)
+        mean_pool = (h * mask_f.unsqueeze(-1)).sum(dim=1) / mask_f.sum(dim=1).clamp(min=1.0).unsqueeze(-1)
+
+        # 2. Learned token-attention residual (starts at `mean_pool` at step 0)
+        scores = self.token_scorer(h).squeeze(-1)
+        scores = scores.masked_fill(attention_mask == 0, torch.finfo(scores.dtype).min)
+        weights = self.attn_dropout(torch.softmax(scores, dim=1)).unsqueeze(-1)
+        attn_pool = (h * weights).sum(dim=1)
+
+        return 0.5 * (mean_pool + attn_pool)
+
+
 class GatedAttention(nn.Module):
     """
     A standalone Gated Attention module for Multiple Instance Learning.
@@ -23,6 +52,19 @@ class GatedAttention(nn.Module):
 
     def forward(self, bag_embeddings, chunk_mask=None):
         # bag_embeddings shape: (batch_size, max_chunks, hidden_size)
+
+        # 3. Calculate Attention Scores -> (batch_size, max_chunks)
+        # attn_scores = self.attention(bag_embeddings).squeeze(-1) 
+        
+        # # Mask out the padding chunks so they receive 0 attention
+        # if chunk_mask is not None:
+        #     attn_scores = attn_scores.masked_fill(chunk_mask == 0, -1e9)
+            
+        # attn_weights = torch.softmax(attn_scores, dim=1) 
+        
+        # # 4. Aggregate chunks into a single function-level embedding
+        # # bmm: (batch, 1, max_chunks) x (batch, max_chunks, hidden_size) -> (batch, 1, hidden_size)
+        # function_representation = torch.bmm(attn_weights.unsqueeze(1), bag_embeddings).squeeze(1)
         
         # 1. Feature extraction and gating
         v = torch.tanh(self.attention_v(bag_embeddings))
@@ -50,7 +92,7 @@ class GatedAttention(nn.Module):
 
 
 class AttentionMILCodeSage(nn.Module):
-    def __init__(self, encoder: nn.Module, hidden_size: int, attention_dim=256, mlp_dropout=0.1):
+    def __init__(self, encoder: nn.Module, hidden_size: int, attention_dim=256, mlp_dropout=0.1, pooling_dropout=0.1):
         super().__init__()
         self.encoder = encoder
         
@@ -60,6 +102,7 @@ class AttentionMILCodeSage(nn.Module):
         #     nn.Tanh(),
         #     nn.Linear(attention_dim, 1)
         # )
+        self.pooling = ResidualTokenAttentionPooling(hidden_size=hidden_size, dropout_prob=pooling_dropout)
         self.attention = GatedAttention(hidden_size, attention_dim)
 
         mlp_hidden_dim = hidden_size // 4  # You can adjust this based on your needs
@@ -93,32 +136,23 @@ class AttentionMILCodeSage(nn.Module):
         
         outputs = self.encoder(input_ids=flat_input_ids, attention_mask=flat_attention_mask)
         # Masked mean pooling in float32 (matches CodeSage-v2 pretraining & avoids bfloat16/float32 mismatches)
-        token_embeddings = outputs.last_hidden_state.float()
-        mask_expanded = flat_attention_mask.unsqueeze(-1).float()
-        chunk_embeddings = (
-            (token_embeddings * mask_expanded).sum(dim=1)
-            / mask_expanded.sum(dim=1).clamp(min=1.0)
-        )
+        # token_embeddings = outputs.last_hidden_state.float()
+        # # token embeddings shape: (batch_size * max_chunks, seq_len, hidden_size)
+        # mask_expanded = flat_attention_mask.unsqueeze(-1).float()
+        # chunk_embeddings = (
+        #     (token_embeddings * mask_expanded).sum(dim=1)
+        #     / mask_expanded.sum(dim=1).clamp(min=1.0)
+        # )
+        chunk_embeddings = self.pooling(outputs.last_hidden_state, flat_attention_mask)
+
         
         # 2. Reshape back into bags -> (batch_size, max_chunks, hidden_size)
         bag_embeddings = chunk_embeddings.view(batch_size, max_chunks, -1)
-        
-        # # 3. Calculate Attention Scores -> (batch_size, max_chunks)
-        # attn_scores = self.attention(bag_embeddings).squeeze(-1) 
-        
-        # # Mask out the padding chunks so they receive 0 attention
-        # if chunk_mask is not None:
-        #     attn_scores = attn_scores.masked_fill(chunk_mask == 0, -1e9)
-            
-        # attn_weights = torch.softmax(attn_scores, dim=1) 
-        
-        # # 4. Aggregate chunks into a single function-level embedding
-        # # bmm: (batch, 1, max_chunks) x (batch, max_chunks, hidden_size) -> (batch, 1, hidden_size)
-        # function_representation = torch.bmm(attn_weights.unsqueeze(1), bag_embeddings).squeeze(1)
 
+        # 3. Apply attention to get a single representation per function
         function_representation, attn_weights = self.attention(bag_embeddings, chunk_mask)
         
-        # 5. Classify the entire function
+        # 4. Classify the entire function
         logits = self.classifier(function_representation)
         
         # Compute loss natively so Hugging Face Trainer can use it seamlessly

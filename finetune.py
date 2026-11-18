@@ -10,7 +10,7 @@ from peft import LoraConfig, get_peft_model, PeftModel
 from datasets import load_dataset, DatasetDict, concatenate_datasets
 from sklearn.metrics import roc_auc_score
 from time import time, perf_counter
-import mulitprocessing
+from multiprocessing import Lock
 
 from collator import AttentionMILCollator
 from classifier_wrapper import AttentionMILCodeSage
@@ -24,7 +24,9 @@ DEBUG = False                       # Set to True for quick testing with a small
 
 CHECKPOINTING_RATIO = 0.6         # Checkpoint only this fraction of CodeSage blocks to balance memory and speed
 MAX_CHUNKS_PER_BAG = 29            # Limit the number of chunks per function to avoid memory issues
-MAX_SEQ_LEN = 1024                  # Each chunk is a sequence of 512 tokens. If you have enough GPU memory, you can increase this to 1024 or 2048, but be aware of the memory trade-offs.
+
+# Use short seq_lens (e.g. 512) so even small changes in the code can be detected, beacause relatively they carry more signal.
+MAX_SEQ_LEN = 512                   # Each chunk is a sequence of 512 tokens. If you have enough GPU memory, you can increase this to 1024 or 2048, but be aware of the memory trade-offs.
 OVERLAP = MAX_SEQ_LEN // 4          # Overlap between chunks to ensure context is preserved across chunk boundaries. This is set to 25% of the chunk size, but you can adjust it based on your needs.
 STRIDE = MAX_SEQ_LEN - OVERLAP
 EPOCHS = 5                          # Number of training epochs. You can increase this for better performance, but it will take longer to train.
@@ -337,7 +339,7 @@ def load_model(model_dir: str, encoder_name: str = "codesage/codesage-large-v2")
 
 
 class Tee:
-    def __init__(self, filename, lock: multiprocessing.Lock, mode="a"):
+    def __init__(self, filename, lock: Lock, mode="a"):
         self.lock = lock
         self.file = open(filename, mode, encoding="utf-8")
         self.stdout = sys.stdout
@@ -383,7 +385,7 @@ def main():
     out_dir = f"out/{experiment_name}"
     os.makedirs(out_dir, exist_ok=True)
 
-    tee = Tee(os.path.join(out_dir, "train.log"))
+    tee = Tee(os.path.join(out_dir, "train.log"), lock=Lock())
     sys.stdout = tee
 
     # Fine-tune the model
