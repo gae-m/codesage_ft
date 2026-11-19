@@ -65,24 +65,7 @@ def load_tokenizer():
     return AutoTokenizer.from_pretrained(encoder_name, trust_remote_code=True)
 
 
-def measure_twin_similarity(encoder, dataset):
-    for i in range(0, len(dataset), 2):
-        assert dataset[i]["commit_id"] == dataset[i+1]["commit_id"], f"Commit IDs do not match for samples {i} and {i+1}"
-
-    dataset = dataset.map(
-        prepare_mil_dataset,
-        fn_kwargs={
-            "tokenizer": tokenizer,
-            "seq_len": 2048,
-            "stride": 512*3,
-            "max_chunks_per_bag": 30,
-            "boundary_ids": get_code_boundary_token_ids(tokenizer),
-        },
-        keep_in_memory=True
-    )
-
-    collator = AttentionMILCollator(pad_token_id=tokenizer.pad_token_id, empty_chunk_ids=tokenizer.build_inputs_with_special_tokens([]))
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=2, collate_fn=collator)
+def measure_twin_similarity(encoder, dataloader):
 
     encoder.eval()  # Set the model to evaluation mode
 
@@ -122,7 +105,7 @@ def measure_twin_similarity(encoder, dataset):
 
 
 def probe_all_layers_twin_separation(
-    mil_model,
+    encoder,
     dataloader,
     num_pairs: int = 16,
 ):
@@ -131,8 +114,8 @@ def probe_all_layers_twin_separation(
     to measure where `codesage-large-v2` separates `vuln` and `patch` twins
     both BEFORE pooling (aligned shared tokens) and AFTER mean pooling.
     """
-    mil_model.eval()
-    device = next(mil_model.parameters()).device
+    encoder.eval()
+    device = next(encoder.parameters()).device
 
     num_layers = 25  # 0 = embeddings, 1..24 = CodeSageBlock 0..23
     pre_pool_rel_l2 = [[] for _ in range(num_layers)]
@@ -149,7 +132,7 @@ def probe_all_layers_twin_separation(
 
         # Single forward pass returning all 25 hidden states (no grad -> ~3.4 GiB VRAM)
         with torch.no_grad(), torch.amp.autocast("cuda", dtype=torch.bfloat16):
-            out = mil_model.encoder(
+            out = encoder(
                 input_ids=batch["input_ids"].view(-1, L),
                 attention_mask=batch["attention_mask"].view(-1, L),
                 output_hidden_states=True,
@@ -249,5 +232,28 @@ tokenizer = load_tokenizer()
 encoder = load_model()
 logger.info(encoder)
 
-dataset: DatasetDict = load_dataset("json", data_files=data_files) # type: ignore
-measure_twin_similarity(encoder, dataset["train"])
+dataset_dict: DatasetDict = load_dataset("json", data_files=data_files) # type: ignore
+
+dataset = dataset_dict["test"]
+
+dataset = dataset.map(
+    prepare_mil_dataset,
+    fn_kwargs={
+        "tokenizer": tokenizer,
+        "seq_len": 2048,        # TODO: try what happens with lower values
+        "stride": 512*3,
+        "max_chunks_per_bag": 30,
+        "boundary_ids": get_code_boundary_token_ids(tokenizer),
+    },
+    keep_in_memory=True
+)
+
+for i in range(0, len(dataset), 2):
+    assert dataset[i]["commit_id"] == dataset[i+1]["commit_id"], f"Commit IDs do not match for samples {i} and {i+1}"
+
+collator = AttentionMILCollator(pad_token_id=tokenizer.pad_token_id, empty_chunk_ids=tokenizer.build_inputs_with_special_tokens([]))
+dataloader = torch.utils.data.DataLoader(dataset, batch_size=2, collate_fn=collator)
+
+measure_twin_similarity(encoder, dataloader)
+
+probe_all_layers_twin_separation(encoder, dataloader, num_pairs=32)

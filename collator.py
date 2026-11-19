@@ -82,3 +82,60 @@ class AttentionMILCollator:
             "chunk_mask": torch.tensor(batch_chunk_mask, dtype=torch.bool),
             "labels": torch.tensor(batch_labels, dtype=torch.bool),
         }
+
+
+class PairedMILCollator():
+    def __init__(self, pad_token_id: int, empty_chunk_ids: list[int]):
+        self.pad_token_id = pad_token_id
+        self.empty_chunk_ids = empty_chunk_ids
+
+    def __call__(
+        self,
+        batch: list[dict[str, Any]],
+    ) -> dict[str, torch.Tensor]:
+        flat_chunks: list[list[list[int]]] = []
+        flat_diffs: list[list[bool]] = []
+        labels: list[bool] = []
+
+        for item in batch:
+            flat_chunks.append(item["vuln_input_ids"])
+            flat_diffs.append(item["vuln_diff_mask"])
+            labels.append(True)
+
+            flat_chunks.append(item["patch_input_ids"])
+            flat_diffs.append(item["patch_diff_mask"])
+            labels.append(False)
+
+        batch_size = len(flat_chunks)  # Always 2 * P
+        max_chunks = max(len(bag) for bag in flat_chunks)
+        raw_max_seq = max(len(chunk) for bag in flat_chunks for chunk in bag)
+        # Bucket sequence length to multiples of 64 for smooth CUDA allocator reuse
+        max_seq_len = ((raw_max_seq + 63) // 64) * 64
+
+        input_ids = torch.full((batch_size, max_chunks, max_seq_len), self.pad_token_id, dtype=torch.long)
+        attention_mask = torch.zeros((batch_size, max_chunks, max_seq_len), dtype=torch.bool) # torch.long)
+        chunk_mask = torch.zeros((batch_size, max_chunks), dtype=torch.bool)
+        diff_mask = torch.zeros((batch_size, max_chunks), dtype=torch.bool) # torch.float32)
+
+        for b_idx, (bag, diffs) in enumerate(zip(flat_chunks, flat_diffs)):
+            for c_idx, (tokens, is_diff) in enumerate(zip(bag, diffs)):
+                seq_len = len(tokens)
+                input_ids[b_idx, c_idx, :seq_len] = torch.tensor(tokens, dtype=torch.long)
+                attention_mask[b_idx, c_idx, :seq_len] = True
+                chunk_mask[b_idx, c_idx] = True
+                diff_mask[b_idx, c_idx] = is_diff
+
+            # Safeguard on padded chunk slots (`chunk_mask=False`): gives encoder 1 valid token
+            # so attention softmax and mean pooling never produce NaNs
+            for pad_c in range(len(bag), max_chunks):
+                len_empty_chunk = len(self.empty_chunk_ids)
+                input_ids[b_idx, pad_c, :len_empty_chunk] = torch.tensor(self.empty_chunk_ids, dtype=torch.long)
+                attention_mask[b_idx, pad_c, :len_empty_chunk] = True
+
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "chunk_mask": chunk_mask,
+            "diff_mask": diff_mask,
+            "labels": torch.tensor(labels, dtype=torch.bool) # torch.float32),
+        }
