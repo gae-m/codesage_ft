@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from cs_checkpointing import disable_codesage_block_checkpointing, enable_codesage_selective_checkpointing
 
@@ -204,6 +205,7 @@ class PairedAttentionMILCodeSage(nn.Module):
         hidden_size: int,
         attention_dim: int,
         classifier_hidden_dim: int,
+        pooling_dropout: float,
         lambda_rank_loss: float,
         lambda_attn_loss: float,
         return_attention: bool = False,
@@ -217,6 +219,7 @@ class PairedAttentionMILCodeSage(nn.Module):
         self.lambda_attn_loss = lambda_attn_loss
         self.return_attention = return_attention
 
+        self.pooling = ResidualTokenAttentionPooling(hidden_size=hidden_size, dropout_prob=pooling_dropout)
         self.attention = GatedAttention(hidden_size, attention_dim, dropout_prob=0.1)
         self.classifier = nn.Sequential(
             nn.Linear(hidden_size, classifier_hidden_dim),
@@ -225,7 +228,15 @@ class PairedAttentionMILCodeSage(nn.Module):
             nn.Linear(classifier_hidden_dim, 1),
         )
         self.bce_loss = nn.BCEWithLogitsLoss()
-        self.rank_loss = nn.SoftMarginLoss
+
+    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+        enable_codesage_selective_checkpointing(
+            self.encoder, 
+            checkpoint_ratio=gradient_checkpointing_kwargs.get("checkpoint_ratio", 1.0) if gradient_checkpointing_kwargs else 1.0
+        )
+
+    def gradient_checkpointing_disable(self):
+        disable_codesage_block_checkpointing(self.encoder)
 
     def forward(
         self,
@@ -255,12 +266,14 @@ class PairedAttentionMILCodeSage(nn.Module):
         outputs = self.encoder(input_ids=flat_ids, attention_mask=flat_mask)
 
         # Masked mean pooling in float32 (matches CodeSage-v2 pretraining & avoids bf16 mismatch)
-        token_embeddings = outputs.last_hidden_state.float()
-        mask_expanded = flat_mask.unsqueeze(-1).float()
-        chunk_embeddings = (
-            (token_embeddings * mask_expanded).sum(dim=1)
-            / mask_expanded.sum(dim=1).clamp(min=1.0)
-        ).view(batch_size, max_chunks, -1)
+        # token_embeddings = outputs.last_hidden_state.float()
+        # mask_expanded = flat_mask.unsqueeze(-1).float()
+        # chunk_embeddings = (
+        #     (token_embeddings * mask_expanded).sum(dim=1)
+        #     / mask_expanded.sum(dim=1).clamp(min=1.0)
+        # ).view(batch_size, max_chunks, -1)
+
+        chunk_embeddings = self.pooling(outputs.last_hidden_state, flat_mask).view(batch_size, max_chunks, -1)
 
         function_representation, attn_weights = self.attention(chunk_embeddings, chunk_mask)
         logits = self.classifier(function_representation).squeeze(-1)
@@ -290,7 +303,7 @@ class PairedAttentionMILCodeSage(nn.Module):
                     attn_loss = torch.where(
                         has_contrast, per_bag_attn_loss, torch.zeros_like(per_bag_attn_loss)
                     ).mean()
-                    loss = loss + self.attn_loss_weight * attn_loss
+                    loss = loss + self.lambda_attn_loss * attn_loss
 
         output: dict[str, torch.Tensor | None] = {"loss": loss, "logits": logits}
         if not self.training and self.return_attention:

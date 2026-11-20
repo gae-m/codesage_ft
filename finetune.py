@@ -17,7 +17,10 @@ from classifier_wrapper import AttentionMILCodeSage
 # from cs_checkpointing import enable_codesage_block_checkpointing
 from code_minification import minify_cpp_function
 from data_process import get_code_boundary_token_ids, prepare_mil_dataset
+
+
 torch.set_float32_matmul_precision('high')  # Ensure high precision for matmul operations, especially on Ampere and newer GPUs
+
 
 ENCODER = "codesage/codesage-large-v2"
 DEBUG = False                       # Set to True for quick testing with a smaller dataset and fewer epochs. This is useful for debugging and ensuring your code runs without errors before committing to a full training run.

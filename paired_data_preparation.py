@@ -42,7 +42,6 @@ def tokenize_with_char_spans(
     tokenizer,
     chunk_size: int,
     stride: int,
-    max_chunks: int,
     boundary_token_ids: set[int]
 ) -> list[tuple[list[int], tuple[int, int]]]:
     """
@@ -90,12 +89,77 @@ def tokenize_with_char_spans(
         start = max(start + 1, end - (eff_chunk_size - eff_stride))
 
     # Head-and-Tail truncation: preserves function signature/setup + trailing cleanup
-    if len(chunks) > max_chunks:
-        logger.info(f"Truncating chunks from {len(chunks)} to {max_chunks} via Head-and-Tail strategy")
-        half = max_chunks // 2
-        chunks = chunks[:half] + chunks[-(max_chunks - half) :]
+    # gm: substitute with truncation around the diff spans instead of head and tail, to preserve the context of the diff
+    # if len(chunks) > max_chunks:
+    #     logger.info(f"Truncating chunks from {len(chunks)} to {max_chunks} via Head-and-Tail strategy")
+    #     half = max_chunks // 2
+    #     chunks = chunks[:half] + chunks[-(max_chunks - half) :]
 
     return chunks
+
+
+def truncate_around_diffs(
+    chunk_items: list[tuple[list[int], tuple[int, int]]],
+    diff_spans: list[tuple[int, int]],
+    max_chunks: int,
+) -> tuple[list[list[int]], list[bool]]:
+    """
+    Labels each chunk (`1.0` if overlapping `diff_spans`, else `0.0`) and truncates
+    bags longer than `max_chunks` by retaining chunk `0` (function signature) plus
+    a symmetric context window expanding outward from the modified chunks.
+    Falls back to Head-and-Tail truncation if `diff_spans` is empty.
+    """
+
+    chunks = [toks for toks, _ in chunk_items]
+    # Compute binary diff label for every chunk before any truncation
+    diff_flags = [
+        any((c_start <= s <= c_end) or (c_start <= e <= c_end) for s, e in diff_spans) for _, (c_start, c_end) in chunk_items
+    ]
+
+    num_chunks = len(chunks)
+    if num_chunks <= max_chunks:
+        return chunks, diff_flags
+
+    # Fallback for unpaired/inference functions where no diff spans exist
+    if not any(diff_flags):
+        half = max_chunks // 2
+        return chunks[:half] + chunks[-(max_chunks - half):], diff_flags[:half] + diff_flags[-(max_chunks - half):]
+
+    diff_indices = [idx for idx, flag in enumerate(diff_flags) if flag]
+
+    # Edge case: massive refactoring patch where modified chunks alone exceed `max_chunks`
+    if len(diff_indices) >= max_chunks:
+        if 0 not in diff_indices:
+            selected_list = [0] + diff_indices[: max_chunks - 1]
+        else:
+            selected_list = diff_indices[:max_chunks]
+        kept_indices = sorted(selected_list)
+        return [chunks[i] for i in kept_indices], [diff_flags[i] for i in kept_indices]
+
+    # Normal case: pin chunk 0 (signature) + all diff chunks, then expand outward by radius `r`
+    selected: set[int] = set(diff_indices)
+    
+    selected.add(0)
+
+    radius = 1
+    while len(selected) < max_chunks:
+        added_any = False
+        for center in diff_indices:
+            for neighbor in (center - radius, center + radius):
+                if 0 <= neighbor < num_chunks and neighbor not in selected:
+                    selected.add(neighbor)
+                    added_any = True
+                    if len(selected) == max_chunks:
+                        break
+            if len(selected) == max_chunks:
+                break
+        if not added_any:
+            break
+        radius += 1
+
+    # Sort indices so chunks stay in natural top-to-bottom code execution order
+    kept_indices = sorted(selected)
+    return [chunks[i] for i in kept_indices], [diff_flags[i] for i in kept_indices]
 
 
 def build_paired_primevul_dataset(
@@ -139,19 +203,12 @@ def build_paired_primevul_dataset(
 
         vuln_spans, patch_spans = get_changed_char_spans(vuln_min, patch_min)
 
-        vuln_items = tokenize_with_char_spans(vuln_min, tokenizer, chunk_size, stride, max_chunks, boundary_token_ids)
-        patch_items = tokenize_with_char_spans(patch_min, tokenizer, chunk_size, stride, max_chunks, boundary_token_ids)
+        vuln_items = tokenize_with_char_spans(vuln_min, tokenizer, chunk_size, stride, boundary_token_ids)
+        patch_items = tokenize_with_char_spans(patch_min, tokenizer, chunk_size, stride, boundary_token_ids)
 
-        # Flag a chunk (`1.0`) if its character span overlaps any modified region
-        vuln_chunks = [toks for toks, _ in vuln_items]
-        vuln_diff = [
-            any(s < c_end and e > c_start for s, e in vuln_spans) for _, (c_start, c_end) in vuln_items
-        ]
 
-        patch_chunks = [toks for toks, _ in patch_items]
-        patch_diff = [
-            any(s < c_end and e > c_start for s, e in patch_spans) for _, (c_start, c_end) in patch_items
-        ]
+        vuln_chunks, vuln_diff = truncate_around_diffs(vuln_items, vuln_spans, max_chunks)
+        patch_chunks, patch_diff = truncate_around_diffs(patch_items, patch_spans, max_chunks)
 
         paired_examples.append(
             {
