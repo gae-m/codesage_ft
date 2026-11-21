@@ -19,13 +19,14 @@ torch.set_float32_matmul_precision('high')
 logger = logging.getLogger("codesage_ft")
 
 
+data_files = {
+    "train": r"data/processed/primevul/primevul_train_paired.jsonl",
+    "valid": r"data/processed/primevul/primevul_valid_paired.jsonl",
+    "test": r"data/processed/primevul/primevul_test_paired.jsonl"
+}
+
 @dataclass
 class FtOpts:
-    data_files = {
-        "train": r"data/processed/primevul/primevul_train_paired.jsonl",
-        "valid": r"data/processed/primevul/primevul_valid_paired.jsonl",
-        "test": r"data/processed/primevul/primevul_test_paired.jsonl"
-    }
     encoder = "codesage/codesage-large-v2"
     debug = False
     max_chunks_per_bag = 16
@@ -53,13 +54,14 @@ def set_logging(log_file_path: str):
         logger.addHandler(handler)
 
 
-def paired_finetuning(opts: FtOpts, out_dir: str):
+
+def paired_finetuning(data_files: dict[str, str], opts: FtOpts, out_dir: str):
     logger.info("Parameters...\n" + "\n".join(f"{k}: {v}" for k, v in asdict(opts).items()))
 
     logger.info("Loading and tokenizing dataset...")
     tokenizer = AutoTokenizer.from_pretrained(opts.encoder, trust_remote_code=True)
 
-    raw_dataset: DatasetDict = load_dataset("json", data_files=opts.data_files) # type: ignore
+    raw_dataset: DatasetDict = load_dataset("json", data_files=data_files) # type: ignore
 
     raw_train_set = concatenate_datasets([raw_dataset["train"], raw_dataset["valid"]])
     raw_test_set = raw_dataset["test"]
@@ -224,7 +226,7 @@ def main():
     os.makedirs(out_dir, exist_ok=True)
 
     # Fine-tune the model
-    paired_finetuning(opts, out_dir)
+    paired_finetuning(data_files, opts, out_dir)
 
 
 if __name__ == "__main__":
