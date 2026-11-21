@@ -367,7 +367,7 @@ class Tee:
         self.file.close()
 
 
-enc_name_map = {
+encoder_name_map = {
     "codesage/codesage-large-v2": "cs2l",
     "codesage/codesage-base-v2": "cs2b",
     "codesage/codesage-small-v2": "cs2s"
@@ -381,7 +381,7 @@ def main():
     args = parser.parse_args()
 
     # Define the output directory for saving the model
-    experiment_name = f"{enc_name_map[ENCODER]}_mil_ft_{int(time())}"
+    experiment_name = f"{encoder_name_map[ENCODER]}_mil_ft_{int(time())}"
     if args.dbg:
         experiment_name = 'dbg_' + experiment_name
 

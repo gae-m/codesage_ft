@@ -1,4 +1,5 @@
 # TODO: Remember: the training dataset must be paired, while the test dataset not.
+import argparse
 import logging
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
@@ -7,27 +8,40 @@ from transformers import AutoTokenizer, AutoModel, AutoConfig, Trainer, Training
 from datasets import load_dataset, DatasetDict, concatenate_datasets
 from peft import LoraConfig, get_peft_model
 import torch
-from time import perf_counter
+from time import perf_counter, time
+from dataclasses import dataclass, asdict
+from finetune import encoder_name_map
+from paired_data_preparation import build_paired_primevul_dataset
+from data_process import prepare_mil_dataset
 
 torch.set_float32_matmul_precision('high')
 
 logger = logging.getLogger("codesage_ft")
 
 
-opts = {
-    "encoder": "codesage/codesage-large-v2",
-    "debug": False,
-    "max_chunks_per_bag": 16,
-    "max_seq_len": 2048,
-    "overlap": 512,
-    "training_batch_size": 1,
-    "stride": 512,
-    "checkpointing_ratio": 0.5,
-    "epochs": 3,
-    "lr_warmup_ratio": 0.1,
-    "gradient_accumulation_steps": 4,
-    "dataloader_workers": 4
-}
+@dataclass
+class FtOpts:
+    data_files = {
+        "train": r"data/processed/primevul/primevul_train_paired.jsonl",
+        "valid": r"data/processed/primevul/primevul_valid_paired.jsonl",
+        "test": r"data/processed/primevul/primevul_test_paired.jsonl"
+    }
+    encoder = "codesage/codesage-large-v2"
+    debug = False
+    max_chunks_per_bag = 16
+    max_seq_len = 2048
+    stride_ratio = 0.75
+    dataloader_workers = 4
+    lora_r = 16
+    lora_alpha = 32
+    lora_dropout = 0.05
+    lr = 2e-4
+    lr_warmup_ratio = 0.1
+    epochs = 5
+    training_batch_size = 1
+    validation_batch_size = 1
+    gradient_accumulation_steps = 8
+    checkpointing_ratio = 0.5
 
 
 def set_logging(log_file_path: str):
@@ -39,15 +53,24 @@ def set_logging(log_file_path: str):
         logger.addHandler(handler)
 
 
-def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "codesage/codesage-large-v2", dbg = False):
-    logger.info("Debug mode: ", dbg)
-    logger.info("Encoder: ", encoder_name)
-    logger.info(f"{MAX_CHUNKS_PER_BAG=}\n{MAX_SEQ_LEN=}\n{OVERLAP=}\n{TRAINING_BATCH_SIZE=}\n{STRIDE=}\n{CHECKPOINTING_RATIO=}")
-    
-    logger.info("Loading and tokenizing dataset...")
-    tokenizer = AutoTokenizer.from_pretrained(encoder_name, trust_remote_code=True)
+def paired_finetuning(opts: FtOpts, out_dir: str):
+    logger.info("Parameters...\n" + "\n".join(f"{k}: {v}" for k, v in asdict(opts).items()))
 
-    raw_dataset: DatasetDict = load_dataset("json", data_files=data_files) # type: ignore
+    logger.info("Loading and tokenizing dataset...")
+    tokenizer = AutoTokenizer.from_pretrained(opts.encoder, trust_remote_code=True)
+
+    raw_dataset: DatasetDict = load_dataset("json", data_files=opts.data_files) # type: ignore
+
+    raw_train_set = concatenate_datasets([raw_dataset["train"], raw_dataset["valid"]])
+    raw_test_set = raw_dataset["test"]
+
+    tokenized_train_set = build_paired_primevul_dataset(
+        raw_paired_records=raw_train_set,
+        tokenizer=tokenizer,
+        chunk_size=opts.max_seq_len,
+        stride=int(opts.max_seq_len * opts.stride_ratio),
+        max_chunks=opts.max_chunks_per_bag
+    )
     
     tokenized_dataset = raw_dataset.map(
         prepare_mil_dataset,
@@ -65,7 +88,7 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
     logger.info("Tokenization complete. Dataset overview:")
     logger.info(tokenized_dataset)
 
-    if dbg:
+    if opts.debug:
         logger.info("Debug mode: Reducing dataset size for quick testing...")
         train_set = tokenized_dataset["train"].select(range(min(10, len(tokenized_dataset["train"]))))
         eval_set = tokenized_dataset["validation"].select(range(min(10, len(tokenized_dataset["validation"]))))
@@ -78,14 +101,14 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
     logger.info("bf16 support:", bf16_support)
 
     logger.info("Loading the model...")
-    config = AutoConfig.from_pretrained(encoder_name, trust_remote_code=True)
+    config = AutoConfig.from_pretrained(opts.encoder, trust_remote_code=True)
     config.attention_dropout_prob = 0.0
     config.residual_dropout_prob = 0.0
     config.embedding_dropout_prob = 0.0
 
     # Load base CodeSage without the classification head
     base_encoder = AutoModel.from_pretrained(
-        encoder_name,
+        opts.encoder,
         trust_remote_code=True,
         config=config,
         torch_dtype=torch.bfloat16 if bf16_support else torch.float32
@@ -94,9 +117,9 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
 
     # Apply LoRA to the base encoder
     lora_config = LoraConfig(
-        r=16,
-        lora_alpha=32,
-        lora_dropout=0.05,
+        r=opts.lora_r,
+        lora_alpha=opts.lora_alpha,
+        lora_dropout=opts.lora_dropout,
         target_modules="all-linear",  # Apply LoRA to all linear layers in the encoder
         fan_in_fan_out=True,
         bias="none"
@@ -115,16 +138,16 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
     # Create the Trainer
     training_args = TrainingArguments(
         output_dir=out_dir,
-        max_steps=3 if dbg else -1,
+        max_steps=3 if opts.debug else -1,
         group_by_length=True,                             # Useful only if batch_size > 1, like for the eval phase in this case
-        per_device_train_batch_size=TRAINING_BATCH_SIZE,  # Keep batch size small; you are processing (batch * chunks) sequences at once
-        per_device_eval_batch_size=1,                     # You can increase this if you have enough GPU memory
-        learning_rate=2e-4,
-        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,   # Simulate a larger batch size
+        per_device_train_batch_size=opts.training_batch_size,  # Keep batch size small; you are processing (batch * chunks) sequences at once
+        per_device_eval_batch_size=opts.validation_batch_size,                     # You can increase this if you have enough GPU memory
+        learning_rate=opts.lr,
+        gradient_accumulation_steps=opts.gradient_accumulation_steps,   # Simulate a larger batch size
         gradient_checkpointing=True,                      # Save memory by not storing intermediate activations. CodeSage does not support gradient checkpointing natively.
-        gradient_checkpointing_kwargs={"checkpoint_ratio": CHECKPOINTING_RATIO}, # Checkpoint only CHECKPOINTING_RATIO of the CodeSage blocks to balance memory and speed
-        warmup_ratio=LR_WARMUP_RATIO,
-        num_train_epochs=EPOCHS,
+        gradient_checkpointing_kwargs={"checkpoint_ratio": opts.checkpointing_ratio}, # Checkpoint only CHECKPOINTING_RATIO of the CodeSage blocks to balance memory and speed
+        warmup_ratio=opts.lr_warmup_ratio,
+        num_train_epochs=opts.epochs,
         bf16=bf16_support,
         # Logging and evaluation strategies
         logging_steps=64,
@@ -139,7 +162,7 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
         eval_strategy="epoch",
         remove_unused_columns=False,
         # Dataloaders ...
-        dataloader_num_workers=DATALOADER_WORKERS,
+        dataloader_num_workers=opts.dataloader_workers,
         dataloader_persistent_workers=True,
         dataloader_pin_memory=True
     )
@@ -177,3 +200,32 @@ def fine_tuning(data_files: dict[str, str], out_dir: str, encoder_name: str = "c
     # 3. Print the comprehensive metrics
     for metric_name, value in test_results.items():
         logger.info(f"{metric_name}: {value:.4f}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Fine-tune CodeSage with Attention-MIL on Paired Datasets")
+    parser.add_argument("--encoder", "-e", type=str, help="Pre-trained CodeSage encoder to use.")
+    parser.add_argument("--dbg", "-d", action="store_true", help="Enable debug mode for quick testing.")
+
+    args = parser.parse_args()
+
+    opts = FtOpts()
+    if args.encoder:
+        opts.encoder = args.encoder
+    if args.dbg:
+        opts.debug = True
+
+    # Define the output directory for saving the model
+    experiment_name = f"{encoder_name_map[opts.encoder]}_mil_paired_ft_{int(time())}"
+    if args.dbg:
+        experiment_name = 'dbg_' + experiment_name
+
+    out_dir = f"out/{experiment_name}"
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Fine-tune the model
+    paired_finetuning(opts, out_dir)
+
+
+if __name__ == "__main__":
+    main()
